@@ -196,6 +196,15 @@ try {
   /* not generated yet — placement falls back to the random bearing */
 }
 
+/** Real aerodromes near each anchor, with their ICAO code (same pre-bake). */
+type Aerodrome = { name: string; icao: string; lat: number; lon: number };
+let AERODROMES: Record<string, Aerodrome[]> = {};
+try {
+  AERODROMES = JSON.parse(readFileSync(new URL('./aerodromes.json', import.meta.url), 'utf8'));
+} catch {
+  /* not generated yet — airstrip jobs keep their generic setting text */
+}
+
 /** Does this anchor have any of the feature a template needs? */
 export function anchorHasFeature(anchorName: string, feature?: 'xing' | 'road'): boolean {
   if (!feature) return true;
@@ -613,7 +622,7 @@ const ACCESS_NOTES = [
 
 const TEMPLATES: Tpl[] = [
   {
-    kind: 'MVA with entrapment',
+    kind: 'MVA with Entrapment',
     feature: 'road',
     category: 'HEMS / trauma',
     cls: 'rotary',
@@ -634,7 +643,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Closed carriageway ~200 m, marked by an appliance'],
   },
   {
-    kind: 'Medical retrieval — rural property',
+    kind: 'Medical Retrieval — Rural Property',
     category: 'Aeromedical',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -655,7 +664,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Home paddock, owner to mark with a vehicle'],
   },
   {
-    kind: 'Coastal / cliff rescue',
+    kind: 'Coastal / Cliff Rescue',
     category: 'Rescue / winch',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -676,7 +685,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Winch to the casualty, transfer on the cliff-top reserve'],
   },
   {
-    kind: 'Swiftwater / flood rescue',
+    kind: 'Swiftwater / Flood Rescue',
     category: 'Rescue / winch',
     cls: 'rotary',
     agencies: [['Westpac Life Saver Rescue', 'Lifesaver'], ['NSW Ambulance', 'Rescue'], ['RACQ LifeFlight Rescue', 'Rescue'], ['Ambulance Victoria', 'HEMS']],
@@ -697,7 +706,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['High ground on the flood-free side, ground party to mark'],
   },
   {
-    kind: 'Structure fire — persons reported',
+    kind: 'Structure Fire — Persons Reported',
     category: 'HEMS / trauma',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -717,7 +726,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Paddock upwind of the smoke, appliance to mark'],
   },
   {
-    kind: 'Level crossing — train vs vehicle',
+    kind: 'Level Crossing — Train vs Vehicle',
     feature: 'xing',
     category: 'HEMS / trauma',
     cls: 'rotary',
@@ -738,7 +747,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Closed road or the adjacent paddock'],
   },
   {
-    kind: 'Bus / coach rollover — multi-casualty',
+    kind: 'Bus / Coach Rollover — Multi-Casualty',
     feature: 'road',
     category: 'HEMS / trauma',
     cls: 'rotary',
@@ -758,7 +767,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Closed carriageway; a triage/loading point will be marked'],
   },
   {
-    kind: 'Search / offender containment',
+    kind: 'Search / Offender Containment',
     category: 'Police aviation',
     cls: 'rotary',
     agencies: POLICE_AGENCIES,
@@ -776,7 +785,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Recovery to base'],
   },
   {
-    kind: 'Missing person — bushland search',
+    kind: 'Missing Person — Bushland Search',
     category: 'Police aviation',
     cls: 'rotary',
     agencies: [...POLICE_AGENCIES, ['National Parks / DBCA', 'Ranger'], ['AMSA / JRCC Australia', 'Rescue']],
@@ -794,7 +803,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Staging area at the search base / trailhead'],
   },
   {
-    kind: 'Marine rescue — winch',
+    kind: 'Marine Rescue — Winch',
     category: 'Marine / SAR',
     cls: 'rotary',
     agencies: [['Westpac Life Saver Rescue', 'Lifesaver'], ['Marine Rescue', 'Marine Rescue'], ['AMSA / JRCC Australia', 'Rescue']],
@@ -816,7 +825,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['N/A — overwater; transfer ashore at the nearest hospital'],
   },
   {
-    kind: 'Diving incident — decompression illness',
+    kind: 'Diving Incident — Decompression Illness',
     category: 'Aeromedical',
     cls: 'rotary',
     agencies: [['RACQ LifeFlight Rescue', 'Rescue'], ['Westpac Life Saver Rescue', 'Lifesaver'], ['NSW Ambulance', 'Rescue']],
@@ -836,7 +845,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Car park or foreshore reserve, keep it low and gentle'],
   },
   {
-    kind: 'Envenomation — remote',
+    kind: 'Envenomation — Remote',
     category: 'Aeromedical',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -856,7 +865,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Airstrip or a graded paddock, owner to mark'],
   },
   {
-    kind: 'Powerline strike / electrocution',
+    kind: 'Powerline Strike / Electrocution',
     feature: 'road',
     category: 'HEMS / trauma',
     cls: 'rotary',
@@ -877,7 +886,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Well clear of the lines, upwind, ground party to mark'],
   },
   {
-    kind: 'Fire reconnaissance / crew insertion',
+    kind: 'Fire Reconnaissance / Crew Insertion',
     category: 'Firefighting support',
     cls: 'rotary',
     agencies: [...FIRE_AGENCIES, ['National Parks / DBCA', 'Ranger']],
@@ -896,7 +905,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Ridge-top hover exit, marked by the crew'],
   },
   {
-    kind: 'Storm damage — SES air support',
+    kind: 'Storm Damage — SES Air Support',
     category: 'Firefighting support',
     cls: 'rotary',
     agencies: [...POLICE_AGENCIES, ...FIRE_AGENCIES, ['National Parks / DBCA', 'Ranger']],
@@ -914,7 +923,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Recovery to the staging area'],
   },
   {
-    kind: 'RFDS primary evacuation',
+    kind: 'RFDS Primary Evacuation',
     category: 'Aeromedical (fixed wing)',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor']],
@@ -935,7 +944,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Unsealed strip — inspect on a low pass'],
   },
   {
-    kind: 'Neonatal / paediatric retrieval',
+    kind: 'Neonatal / Paediatric Retrieval',
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['NSW Air Ambulance', 'Ambulance'], ['Ambulance Victoria', 'Ambulance'], ['Royal Flying Doctor Service', 'Flying Doctor']],
@@ -955,7 +964,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Sealed runway'],
   },
   {
-    kind: 'Obstetric flying squad',
+    kind: 'Obstetric Flying Squad',
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor'], ['NSW Air Ambulance', 'Ambulance']],
@@ -975,7 +984,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Unsealed or sealed strip depending on the site'],
   },
   {
-    kind: 'Burns — inter-hospital transfer',
+    kind: 'Burns — Inter-Hospital Transfer',
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor'], ['Ambulance Victoria', 'Ambulance'], ['NSW Air Ambulance', 'Ambulance']],
@@ -995,7 +1004,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Sealed runway'],
   },
   {
-    kind: 'Inter-hospital transfer (fixed wing)',
+    kind: 'Inter-Hospital Transfer (Fixed Wing)',
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor'], ['Ambulance Victoria', 'Ambulance'], ['NSW Air Ambulance', 'Ambulance']],
@@ -1016,7 +1025,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Sealed runway'],
   },
   {
-    kind: 'Search and rescue — offshore',
+    kind: 'Search and Rescue — Offshore',
     category: 'SAR',
     cls: 'fixed',
     agencies: [['AMSA / JRCC Australia', 'Rescue'], ['JRCC Australia', 'Rescue']],
@@ -1036,7 +1045,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Recovery to a coastal aerodrome'],
   },
   {
-    kind: 'Fire mapping / air attack supervision',
+    kind: 'Fire Mapping / Air Attack Supervision',
     category: 'Firefighting (fixed wing)',
     cls: 'fixed',
     agencies: [...FIRE_AGENCIES, ['Aerial Survey Operations', 'Survey']],
@@ -1055,7 +1064,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Recovery to the air tanker base'],
   },
   {
-    kind: 'Maritime surveillance patrol',
+    kind: 'Maritime Surveillance Patrol',
     category: 'Border / fisheries',
     cls: 'fixed',
     agencies: [['Australian Border Force', 'Border'], ['AMSA / JRCC Australia', 'Rescue']],
@@ -1074,7 +1083,7 @@ const TEMPLATES: Tpl[] = [
     lz: ['Recovery to the surveillance base'],
   },
   {
-    kind: 'Aerial survey / photography',
+    kind: 'Aerial Survey / Photography',
     category: 'Survey',
     cls: 'fixed',
     agencies: [['Aerial Survey Operations', 'Survey'], ['National Parks / DBCA', 'Ranger']],
@@ -1149,14 +1158,23 @@ export function generateJob(near?: { lat: number; lon: number } | null): Job {
   }
   const anchor = rand(pool.length ? pool : ANCHORS);
   const spot = (tpl.feature && placeOnFeature(anchor, tpl.feature)) || placePoint(anchor, tpl.terrain);
-  const lat = spot.lat;
-  const lon = spot.lon;
+  let lat = spot.lat;
+  let lon = spot.lon;
   const [agencyName] = pickAgency(tpl.agencies, anchor.region);
   const csTmpl = tpl.agencies.find((a) => a[0] === agencyName)?.[1] ?? 'Rescue';
   const callsign = callsignFor(agencyName, csTmpl);
+  // Airstrip jobs name a REAL aerodrome — "Newcastle Airport (YWLM)" rather than
+  // "the town aerodrome at Newcastle" — and the job sits on that field, not on a
+  // random bearing from the town.
+  const aero = tpl.terrain === 'airstrip' ? (AERODROMES[anchor.name]?.length ? rand(AERODROMES[anchor.name]!) : null) : null;
+  if (aero) {
+    lat = aero.lat;
+    lon = aero.lon;
+  }
   const setting = tpl.settings.length ? rand(tpl.settings) : anchor.name;
-  const loc =
-    tpl.terrain === 'offshore'
+  const loc = aero
+    ? `${aero.name} (${aero.icao})`
+    : tpl.terrain === 'offshore'
       ? anchor.name
       : tpl.terrain === 'airstrip'
         ? `${setting} at ${anchor.name}`
@@ -1427,7 +1445,7 @@ const FIGHTER_SQNS: [string, string][] = [
 
 const RAAFV_TEMPLATES: RaafTpl[] = [
   {
-    kind: 'QRA scramble - intercept',
+    kind: 'QRA Scramble - Intercept',
     category: 'Air defence',
     cls: 'fixed',
     agencies: FIGHTER_SQNS,
@@ -1447,7 +1465,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     build: (base) => intercept(base, chance(0.3) ? THREATS.raid! : THREATS.fast!),
   },
   {
-    kind: 'QRA scramble - slow mover',
+    kind: 'QRA Scramble - Slow Mover',
     category: 'Air defence',
     cls: 'fixed',
     agencies: FIGHTER_SQNS,
@@ -1467,7 +1485,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     build: (base) => intercept(base, rand([THREATS.light!, THREATS.uas!, THREATS.heli!])),
   },
   {
-    kind: 'Comms-loss airliner shadow',
+    kind: 'Comms-Loss Airliner Shadow',
     category: 'Air defence',
     cls: 'fixed',
     agencies: FIGHTER_SQNS,
@@ -1483,7 +1501,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     build: (base) => intercept(base, THREATS.airliner!),
   },
   {
-    kind: 'Combat air patrol - CAP station',
+    kind: 'Combat Air Patrol - CAP Station',
     category: 'Air defence',
     cls: 'fixed',
     agencies: FIGHTER_SQNS,
@@ -1503,7 +1521,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Air combat training (DACT)',
+    kind: 'Air Combat Training (DACT)',
     category: 'Air defence',
     cls: 'fixed',
     agencies: FIGHTER_SQNS,
@@ -1528,7 +1546,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Air-to-air refuelling - tanker rendezvous',
+    kind: 'Air-To-Air Refuelling - Tanker Rendezvous',
     category: 'Air mobility',
     cls: 'fixed',
     agencies: [['No. 33 Squadron RAAF (KC-30A)', 'Dragon']],
@@ -1552,7 +1570,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Transport / VIP escort',
+    kind: 'Transport / VIP Escort',
     category: 'Air mobility',
     cls: 'fixed',
     agencies: [['No. 35 Squadron RAAF (C-27J)', 'Spartan'], ['No. 37 Squadron RAAF (C-130J)', 'Hercules'], ['No. 34 Squadron RAAF (BBJ)', 'Envoy']],
@@ -1585,7 +1603,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Airborne insertion - DZ overwatch',
+    kind: 'Airborne Insertion - DZ Overwatch',
     category: 'Air mobility',
     cls: 'fixed',
     agencies: [['No. 37 Squadron RAAF (C-130J)', 'Hercules'], ['No. 35 Squadron RAAF (C-27J)', 'Spartan']],
@@ -1618,7 +1636,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Close air support - JTAC',
+    kind: 'Close Air Support - JTAC',
     category: 'Strike / ISR',
     cls: 'fixed',
     agencies: [['No. 1 Squadron RAAF (F/A-18F)', 'Rhino'], ['No. 75 Squadron RAAF (F-35A)', 'Dingo'], ['No. 4 Squadron RAAF (FAC)', 'Havoc']],
@@ -1637,7 +1655,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Tactical reconnaissance run',
+    kind: 'Tactical Reconnaissance Run',
     category: 'Strike / ISR',
     cls: 'fixed',
     agencies: [['No. 75 Squadron RAAF (F-35A)', 'Dingo'], ['No. 1 Squadron RAAF (F/A-18F)', 'Rhino']],
@@ -1656,7 +1674,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Maritime patrol - surface picture',
+    kind: 'Maritime Patrol - Surface Picture',
     category: 'ISR / maritime',
     cls: 'fixed',
     agencies: [['No. 11 Squadron RAAF (P-8A)', 'Poseidon'], ['No. 10 Squadron RAAF (P-8A)', 'Poseidon']],
@@ -1677,7 +1695,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Sovereignty patrol - northern approaches',
+    kind: 'Sovereignty Patrol - Northern Approaches',
     category: 'ISR / maritime',
     cls: 'fixed',
     agencies: [['No. 11 Squadron RAAF (P-8A)', 'Poseidon'], ['No. 2 Squadron RAAF (E-7A)', 'Wedgetail']],
@@ -1697,7 +1715,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'ISR orbit - area of operations',
+    kind: 'ISR Orbit - Area of Operations',
     category: 'ISR / maritime',
     cls: 'fixed',
     agencies: [['No. 2 Squadron RAAF (E-7A)', 'Wedgetail']],
@@ -1716,7 +1734,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Aeromedical evacuation (mil)',
+    kind: 'Aeromedical Evacuation (Mil)',
     category: 'Air mobility',
     cls: 'fixed',
     agencies: [['No. 36 Squadron RAAF (C-17A)', 'Stallion'], ['No. 37 Squadron RAAF (C-130J)', 'Hercules']],
