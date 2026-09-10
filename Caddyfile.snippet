@@ -29,6 +29,20 @@ dispatcher.actuallyleviticus.xyz {
 		header @payload Cache-Control "public, max-age=31536000, immutable"
 	}
 
+	# --- one-click download ------------------------------------------------------
+	# https://dispatcher.actuallyleviticus.xyz/install downloads the current
+	# installer straight away — no landing page, no version in the URL to go stale.
+	# `latest.exe` is a symlink that `npm run publish` repoints at each release;
+	# Content-Disposition gives the browser a sensible filename instead of
+	# "latest.exe".
+	handle /install {
+		root * /opt/aed-dispatcher/updates
+		rewrite * /latest.exe
+		header Content-Disposition "attachment; filename=\"Aus Emergency Dispatcher Setup.exe\""
+		header Cache-Control "no-cache"
+		file_server
+	}
+
 	# --- realtime sync API ------------------------------------------------------
 	handle {
 		reverse_proxy 127.0.0.1:3100

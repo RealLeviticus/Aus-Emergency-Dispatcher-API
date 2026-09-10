@@ -7,7 +7,7 @@
 import { copyFileSync, existsSync, mkdirSync } from 'fs';
 import path from 'path';
 
-const ASSETS = ['features.json', 'aerodromes.json'];
+const ASSETS = ['features.json', 'aerodromes.json', 'hospitals.json'];
 mkdirSync('dist', { recursive: true });
 for (const f of ASSETS) {
   const from = path.join('src', f);

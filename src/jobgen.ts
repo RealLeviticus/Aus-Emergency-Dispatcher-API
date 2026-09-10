@@ -256,79 +256,95 @@ function placePoint(anchor: Anchor, terrain: Terrain): { lat: number; lon: numbe
   }
 }
 
-// ---- Australian hospital helipads (HEMS receiving sites) ------------
-// Coordinates are SNAPPED to the helipad in the `simfocus-autogen-helipads-world-2024`
-// package where one exists, so the transport leg always ends somewhere the
-// player can actually put the aircraft down. `pad` is that package's ident.
+// ---- Australian hospitals (HEMS receiving and referring sites) ------
+// Built from OpenStreetMap by scratchpad/build.mjs and audited against the
+// `simfocus-autogen-helipads-world-2024` package: every entry is a real
+// hospital, its region comes from a point-in-polygon test against the state
+// boundaries, and where the sim has a helipad on site the coordinate is SNAPPED
+// to that pad so the transport leg ends somewhere the player can land.
 //
-// 42 of 56 have a pad. The 14 without one are real hospitals that the sim
-// package simply does not cover (mostly remote WA/NT and a few VIC/NSW
-// regionals); they keep their real-world position and the crew lands on the
-// grounds. Regenerate with scratchpad/gen-hospitals.mjs after a package update.
-const HOSPITALS: (Hospital & { region: string; pad?: string })[] = [
-  { name: 'The Alfred Hospital HLS, Melbourne', region: 'VIC', lat: -37.84525, lon: 144.98131, pad: 'YAFD' },
-  { name: 'Royal Melbourne Hospital HLS', region: 'VIC', lat: -37.79930, lon: 144.95603, pad: 'YRMH' },
-  { name: 'Royal Children’s Hospital HLS, Parkville', region: 'VIC', lat: -37.79405, lon: 144.95131, pad: 'YRHO' },
-  { name: 'Monash Medical Centre HLS, Clayton', region: 'VIC', lat: -37.91960, lon: 145.12401, pad: 'ZS8HW' },
-  { name: 'University Hospital Geelong HLS', region: 'VIC', lat: -38.15151, lon: 144.36593, pad: 'YGEH' },
-  { name: 'Ballarat Base Hospital HLS', region: 'VIC', lat: -37.55912, lon: 143.84568, pad: '7AT0L' },
-  { name: 'Bendigo Health HLS', region: 'VIC', lat: -36.74875, lon: 144.28237, pad: 'S11FM' },
-  { name: 'Albury Wodonga Health HLS', region: 'VIC', lat: -36.07921, lon: 146.93857, pad: 'O5STS' },
-  { name: 'Latrobe Regional Hospital HLS, Traralgon', region: 'VIC', lat: -38.21952, lon: 146.47245, pad: '40CFE' },
-  { name: 'South West Healthcare HLS, Warrnambool', region: 'VIC', lat: -38.37670, lon: 142.50330 },
-  { name: 'Mildura Base Public Hospital HLS', region: 'VIC', lat: -34.18624, lon: 142.14306 },
-  { name: 'Goulburn Valley Health HLS, Shepparton', region: 'VIC', lat: -36.37190, lon: 145.40120 },
-  { name: 'Royal North Shore Hospital HLS, St Leonards', region: 'NSW', lat: -33.82123, lon: 151.19206, pad: 'YRNS' },
-  { name: 'Westmead Hospital HLS', region: 'NSW', lat: -33.80263, lon: 150.99005, pad: 'Y5Y1F' },
-  { name: 'Liverpool Hospital HLS', region: 'NSW', lat: -33.92070, lon: 150.92993, pad: '8FJAD' },
-  { name: 'Nepean Hospital HLS, Penrith', region: 'NSW', lat: -33.75943, lon: 150.71492, pad: '4KC15' },
-  { name: 'John Hunter Hospital HLS, Newcastle', region: 'NSW', lat: -32.92399, lon: 151.69344, pad: 'RYGBR' },
-  { name: 'Wollongong Hospital HLS', region: 'NSW', lat: -34.42452, lon: 150.88297 },
-  { name: 'Canberra Hospital HLS, Garran', region: 'ACT', lat: -35.34386, lon: 149.09995, pad: 'YXCB' },
-  { name: 'Orange Health Service HLS', region: 'NSW', lat: -33.31677, lon: 149.09263, pad: 'Y2XOA' },
-  { name: 'Wagga Wagga Base Hospital HLS', region: 'NSW', lat: -35.11909, lon: 147.35714, pad: 'YXWG' },
-  { name: 'Dubbo Base Hospital HLS', region: 'NSW', lat: -32.23866, lon: 148.62049, pad: 'RXXUH' },
-  { name: 'Tamworth Rural Referral Hospital HLS', region: 'NSW', lat: -31.07215, lon: 150.92664, pad: 'H8TA3' },
-  { name: 'Port Macquarie Base Hospital HLS', region: 'NSW', lat: -31.45233, lon: 152.87667, pad: 'I5I1P' },
-  { name: 'Coffs Harbour Health Campus HLS', region: 'NSW', lat: -30.31703, lon: 153.09221, pad: 'MYARM' },
-  { name: 'Lismore Base Hospital HLS', region: 'NSW', lat: -28.80905, lon: 153.29205, pad: '8MHML' },
-  { name: 'Griffith Base Hospital HLS', region: 'NSW', lat: -34.28202, lon: 146.04394 },
-  { name: 'Princess Alexandra Hospital HLS, Brisbane', region: 'QLD', lat: -27.50017, lon: 153.03368, pad: '49SKB' },
-  { name: 'Royal Brisbane & Women’s Hospital HLS', region: 'QLD', lat: -27.44702, lon: 153.02824, pad: 'YJA8E' },
-  { name: 'Gold Coast University Hospital HLS, Southport', region: 'QLD', lat: -27.95951, lon: 153.38198, pad: 'YXHG' },
-  { name: 'Sunshine Coast University Hospital HLS, Birtinya', region: 'QLD', lat: -26.74732, lon: 153.11368, pad: '82ZHC' },
-  { name: 'Toowoomba Hospital HLS', region: 'QLD', lat: -27.57043, lon: 151.94590, pad: 'CGP32' },
-  { name: 'Bundaberg Hospital HLS', region: 'QLD', lat: -24.86945, lon: 152.33507, pad: '7GTTD' },
-  { name: 'Rockhampton Hospital HLS', region: 'QLD', lat: -23.37963, lon: 150.49520, pad: '5FT2S' },
-  { name: 'Mackay Base Hospital HLS', region: 'QLD', lat: -21.14543, lon: 149.15445, pad: '385DA' },
-  { name: 'Townsville University Hospital HLS', region: 'QLD', lat: -19.32027, lon: 146.76060, pad: 'Y6I9C' },
-  { name: 'Cairns Hospital HLS', region: 'QLD', lat: -16.91148, lon: 145.76892, pad: 'O3SBI' },
-  { name: 'Hervey Bay Hospital HLS', region: 'QLD', lat: -25.29998, lon: 152.82137, pad: 'ZH51B' },
-  { name: 'Royal Adelaide Hospital HLS', region: 'SA', lat: -34.92066, lon: 138.58613, pad: '7F2US' },
-  { name: 'Flinders Medical Centre HLS, Bedford Park', region: 'SA', lat: -35.02002, lon: 138.56858, pad: 'GB8HU' },
-  { name: 'Lyell McEwin Hospital HLS, Elizabeth Vale', region: 'SA', lat: -34.74886, lon: 138.66580, pad: '2LC35' },
-  { name: 'Mount Gambier Hospital HLS', region: 'SA', lat: -37.80526, lon: 140.78690 },
-  { name: 'Port Augusta Hospital HLS', region: 'SA', lat: -32.50999, lon: 137.77593 },
-  { name: 'Royal Perth Hospital HLS', region: 'WA', lat: -31.95368, lon: 115.86654, pad: 'ZXAIJ' },
-  { name: 'Fiona Stanley Hospital HLS, Murdoch', region: 'WA', lat: -32.07057, lon: 115.84688, pad: 'FXCFH' },
-  { name: 'Sir Charles Gairdner Hospital HLS, Nedlands', region: 'WA', lat: -31.96881, lon: 115.81689, pad: 'M6POY' },
-  { name: 'Bunbury Regional Hospital HLS', region: 'WA', lat: -33.36616, lon: 115.64865 },
-  { name: 'Geraldton Health Campus HLS', region: 'WA', lat: -28.78340, lon: 114.61134 },
-  { name: 'Kalgoorlie Health Campus HLS', region: 'WA', lat: -30.74094, lon: 121.47040 },
-  { name: 'Broome Hospital HLS', region: 'WA', lat: -17.96079, lon: 122.23653 },
-  { name: 'Hedland Health Campus HLS, Port Hedland', region: 'WA', lat: -20.41440, lon: 118.59900, pad: 'EF68X' },
-  { name: 'Royal Hobart Hospital HLS', region: 'TAS', lat: -42.87972, lon: 147.33047, pad: '683ZA' },
-  { name: 'Launceston General Hospital HLS', region: 'TAS', lat: -41.44754, lon: 147.14026, pad: 'YXLU' },
-  { name: 'North West Regional Hospital HLS, Burnie', region: 'TAS', lat: -41.04705, lon: 145.88041, pad: 'YBUI' },
-  { name: 'Royal Darwin Hospital HLS, Tiwi', region: 'NT', lat: -12.40720, lon: 130.91820 },
-  { name: 'Alice Springs Hospital HLS', region: 'NT', lat: -23.70618, lon: 133.87826 },
-];
+//   major  a tertiary/trauma centre - the destination for definitive care
+//   pad    ident in the MSFS helipad package (166 of them have one)
+//   ed     present and false only when the hospital has NO emergency department:
+//          it can refer a patient out, but nobody is flown TO it
+type HospitalRow = Hospital & { region: string; major?: boolean; ed?: false };
+let HOSPITALS: HospitalRow[];
+try {
+  // Same ESM-safe read as features.json - see the note there.
+  HOSPITALS = JSON.parse(readFileSync(new URL('./hospitals.json', import.meta.url), 'utf8')) as HospitalRow[];
+} catch (err) {
+  // Unlike features/aerodromes there is no sane fallback: with no hospitals
+  // every transport job would have nowhere to go. Fail loudly at boot instead.
+  throw new Error(
+    'jobgen: could not read hospitals.json next to this module. ' +
+      'It ships in src/ and is copied to dist/ by scripts/copy-assets.mjs — ' +
+      `run "npm run build" before starting. (${(err as Error).message})`,
+  );
+}
+
+/** Hospitals a patient can be flown TO: everything with an emergency department. */
+const RECEIVING = HOSPITALS.filter((h) => h.ed !== false);
+
+/**
+ * How far a patient-transport job must be from its receiving hospital before an
+ * air asset is credible tasking.
+ *
+ * A road ambulance beats a helicopter over short distances — an MVA 500 m from
+ * Royal Brisbane is a two-minute drive, not a HEMS job. Real HEMS thresholds sit
+ * around 30-45 minutes of road time; 20 NM (~37 km) is the rough equivalent.
+ * Fixed-wing aeromedical only makes sense much further out again.
+ */
+const MIN_TRANSPORT_NM: Record<string, number> = { rotary: 20, fixed: 60 };
+
+/**
+ * The referring hospital for a transfer: a real, NON-tertiary hospital near the
+ * anchor — you transfer *from* a district hospital *to* a major centre, never
+ * the other way round. Prefers one with a sim helipad so the pickup is landable.
+ */
+function referringHospital(anchor: Anchor, min = MIN_TRANSPORT_NM.rotary ?? 0): HospitalRow | null {
+  // Far enough from its tertiary centre to be worth flying: Lyell McEwin to the
+  // Royal Adelaide is 11 NM and goes by road.
+  const near = HOSPITALS.filter((h) => {
+    if (h.major || rngNm(anchor.lat, anchor.lon, h.lat, h.lon) > 160) return false;
+    const m = nearestHospital(h.lat, h.lon, true);
+    return rngNm(h.lat, h.lon, m.lat, m.lon) >= min;
+  });
+  if (!near.length) return null;
+  const withPad = near.filter((h) => h.pad);
+  return rand(withPad.length ? withPad : near);
+}
+
+/**
+ * The nearest hospital to `from` that is far enough away to be worth flying,
+ * excluding `from` itself.
+ *
+ * Not every transfer runs to a capital: Lismore to Tweed Valley is 36 NM and is
+ * a routine urgent transfer, with both ends regional. Restricting destinations
+ * to the tertiary centres alone made that pairing impossible to generate.
+ */
+function transferPartner(from: Hospital, minNm: number): Hospital | null {
+  const options = RECEIVING.filter((h) => h.name !== from.name && rngNm(from.lat, from.lon, h.lat, h.lon) >= minNm);
+  if (!options.length) return null;
+  const withPad = options.filter((h) => h.pad);
+  const pool = withPad.length ? withPad : options;
+  let best = pool[0]!;
+  let bestD = Infinity;
+  for (const h of pool) {
+    const d = rngNm(from.lat, from.lon, h.lat, h.lon);
+    if (d < bestD) {
+      bestD = d;
+      best = h;
+    }
+  }
+  return best;
+}
 
 /** Nearest real hospital helipad to a point (used for the patient-transport leg). */
-function nearestHospital(lat: number, lon: number): Hospital {
-  let best = HOSPITALS[0]!;
+function nearestHospital(lat: number, lon: number, majorOnly = false): Hospital {
+  const pool = majorOnly ? RECEIVING.filter((h) => h.major) : RECEIVING;
+  let best = pool[0]!;
   let bestD = Infinity;
-  for (const h of HOSPITALS) {
+  for (const h of pool) {
     const d = rngNm(lat, lon, h.lat, h.lon);
     if (d < bestD) {
       bestD = d;
@@ -360,6 +376,24 @@ type Tpl = {
   p1: number;
   p2: number;
   transport?: boolean;
+  /**
+   * Destination is a tertiary centre rather than the nearest hospital. True for
+   * retrievals AND for serious trauma: a trapped patient goes to a trauma
+   * centre, not to the nearest cottage hospital.
+   */
+  toDefinitiveCare?: boolean;
+  /**
+   * The patient is already IN a hospital: place the job on a real (non-tertiary)
+   * hospital helipad rather than a random point, and fly them to definitive
+   * care. Without this an "inter-hospital transfer" starts in a paddock.
+   */
+  fromHospital?: boolean;
+  /**
+   * A retrieval or inter-hospital transfer, where flying the patient IS the job.
+   * These skip the distance floor — unlike a scene job, there is no "a road
+   * ambulance would have taken this" alternative to fall back to.
+   */
+  alwaysTransports?: boolean;
   offshore?: boolean;
   anchorKinds?: Anchor['kind'][];
   /** where the incident physically sits — controls coordinate placement */
@@ -623,6 +657,7 @@ const ACCESS_NOTES = [
 const TEMPLATES: Tpl[] = [
   {
     kind: 'MVA with Entrapment',
+    toDefinitiveCare: true,
     feature: 'road',
     category: 'HEMS / trauma',
     cls: 'rotary',
@@ -644,6 +679,8 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Medical Retrieval — Rural Property',
+    toDefinitiveCare: true,
+    alwaysTransports: true,
     category: 'Aeromedical',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -665,6 +702,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Coastal / Cliff Rescue',
+    toDefinitiveCare: true,
     category: 'Rescue / winch',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -686,6 +724,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Swiftwater / Flood Rescue',
+    toDefinitiveCare: true,
     category: 'Rescue / winch',
     cls: 'rotary',
     agencies: [['Westpac Life Saver Rescue', 'Lifesaver'], ['NSW Ambulance', 'Rescue'], ['RACQ LifeFlight Rescue', 'Rescue'], ['Ambulance Victoria', 'HEMS']],
@@ -707,6 +746,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Structure Fire — Persons Reported',
+    toDefinitiveCare: true,
     category: 'HEMS / trauma',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -727,6 +767,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Level Crossing — Train vs Vehicle',
+    toDefinitiveCare: true,
     feature: 'xing',
     category: 'HEMS / trauma',
     cls: 'rotary',
@@ -748,6 +789,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Bus / Coach Rollover — Multi-Casualty',
+    toDefinitiveCare: true,
     feature: 'road',
     category: 'HEMS / trauma',
     cls: 'rotary',
@@ -804,6 +846,8 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Marine Rescue — Winch',
+    toDefinitiveCare: true,
+    alwaysTransports: true,
     category: 'Marine / SAR',
     cls: 'rotary',
     agencies: [['Westpac Life Saver Rescue', 'Lifesaver'], ['Marine Rescue', 'Marine Rescue'], ['AMSA / JRCC Australia', 'Rescue']],
@@ -826,6 +870,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Diving Incident — Decompression Illness',
+    toDefinitiveCare: true,
     category: 'Aeromedical',
     cls: 'rotary',
     agencies: [['RACQ LifeFlight Rescue', 'Rescue'], ['Westpac Life Saver Rescue', 'Lifesaver'], ['NSW Ambulance', 'Rescue']],
@@ -846,6 +891,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Envenomation — Remote',
+    toDefinitiveCare: true,
     category: 'Aeromedical',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -866,6 +912,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Powerline Strike / Electrocution',
+    toDefinitiveCare: true,
     feature: 'road',
     category: 'HEMS / trauma',
     cls: 'rotary',
@@ -924,6 +971,8 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'RFDS Primary Evacuation',
+    toDefinitiveCare: true,
+    alwaysTransports: true,
     category: 'Aeromedical (fixed wing)',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor']],
@@ -945,6 +994,8 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Neonatal / Paediatric Retrieval',
+    toDefinitiveCare: true,
+    alwaysTransports: true,
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['NSW Air Ambulance', 'Ambulance'], ['Ambulance Victoria', 'Ambulance'], ['Royal Flying Doctor Service', 'Flying Doctor']],
@@ -965,6 +1016,8 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Obstetric Flying Squad',
+    toDefinitiveCare: true,
+    alwaysTransports: true,
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor'], ['NSW Air Ambulance', 'Ambulance']],
@@ -985,6 +1038,8 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Burns — Inter-Hospital Transfer',
+    toDefinitiveCare: true,
+    alwaysTransports: true,
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor'], ['Ambulance Victoria', 'Ambulance'], ['NSW Air Ambulance', 'Ambulance']],
@@ -1004,7 +1059,41 @@ const TEMPLATES: Tpl[] = [
     lz: ['Sealed runway'],
   },
   {
+    kind: 'Inter-Hospital Transfer (Rotary)',
+    toDefinitiveCare: true,
+    alwaysTransports: true,
+    fromHospital: true,
+    category: 'Critical care transfer',
+    cls: 'rotary',
+    agencies: HEMS_AGENCIES,
+    p1: 0.55,
+    p2: 0.4,
+    weight: 2,
+    transport: true,
+    anchorKinds: ['regional', 'remote'],
+    terrain: 'urban',
+    cas: 'medical',
+    settings: [],
+    brief: [
+      'District hospital has a patient beyond their capability — needs a tertiary centre.',
+      'Time-critical transfer, receiving unit is standing by.',
+    ],
+    detail: (c) =>
+      `Bed-to-bed transfer from ${c.loc}${c.hospital ? ` to ${c.hospital}` : ' to a tertiary centre'}. ` +
+      `The referring team will have the patient packaged on the pad; expect a short turnaround and a retrieval doctor on board.`,
+    hazards: [
+      'Confined hospital helipad, obstacles and rooftop turbulence',
+      'Patient may deteriorate in flight — plan a diversion',
+      'Night pad, limited lighting',
+    ],
+    persons: ['1 patient + referring team'],
+    access: ['Hospital helipad, ambulance on the pad'],
+    lz: ['Hospital helipad — confined, watch the approach path'],
+  },
+  {
     kind: 'Inter-Hospital Transfer (Fixed Wing)',
+    toDefinitiveCare: true,
+    alwaysTransports: true,
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor'], ['Ambulance Victoria', 'Ambulance'], ['NSW Air Ambulance', 'Ambulance']],
@@ -1131,7 +1220,22 @@ function dms(lat: number, lon: number): string {
  * rest are national.
  */
 export function generateJob(near?: { lat: number; lon: number } | null): Job {
-  const tpl = pickTpl(TEMPLATES);
+  // Some templates cannot be placed credibly everywhere: a fixed-wing retrieval
+  // needs an anchor 60 NM from definitive care, and a transfer needs somewhere
+  // to transfer from. Rather than generate one anyway and end up with a
+  // "retrieval" 9 NM from the Gold Coast, re-roll the template.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const job = buildJob(pickTpl(TEMPLATES), near, true);
+    if (job) return job;
+  }
+  return buildJob(pickTpl(TEMPLATES), near, false)!;
+}
+
+function buildJob(
+  tpl: (typeof TEMPLATES)[number],
+  near: { lat: number; lon: number } | null | undefined,
+  strict: boolean,
+): Job | null {
   let pool = tpl.anchorKinds
     ? (tpl.offshore ? COASTAL : ANCHORS).filter((a) => tpl.anchorKinds!.includes(a.kind))
     : tpl.offshore
@@ -1156,7 +1260,32 @@ export function generateJob(near?: { lat: number; lon: number } | null): Job {
     const able = pool.filter((a) => anchorHasFeature(a.name, tpl.feature));
     if (able.length) pool = able;
   }
+
+  // An air asset only makes sense where definitive care is far away. In a
+  // capital the road ambulance reaches the trauma centre in minutes and HEMS is
+  // simply not tasked — so don't generate the job there at all, rather than
+  // generating one and stripping its transport leg. This also stops a
+  // "retrieval" being a 20 NM hop next door to a capital.
+  // A transfer needs somewhere to transfer FROM, far enough out that the flight
+  // is credible for THIS aircraft — a fixed-wing transfer needs 60 NM, not the
+  // rotary 20.
+  const clsMin = MIN_TRANSPORT_NM[tpl.cls] ?? 0;
+  if (tpl.fromHospital) {
+    const able = pool.filter((a) => referringHospital(a, clsMin) !== null);
+    if (able.length) pool = able;
+    else if (strict) return null;
+  }
+
+  if (tpl.transport && tpl.toDefinitiveCare) {
+    const remote = pool.filter((a) => {
+      const h = nearestHospital(a.lat, a.lon, true);
+      return rngNm(a.lat, a.lon, h.lat, h.lon) >= clsMin;
+    });
+    if (remote.length) pool = remote;
+    else if (strict) return null;
+  }
   const anchor = rand(pool.length ? pool : ANCHORS);
+
   const spot = (tpl.feature && placeOnFeature(anchor, tpl.feature)) || placePoint(anchor, tpl.terrain);
   let lat = spot.lat;
   let lon = spot.lon;
@@ -1166,13 +1295,32 @@ export function generateJob(near?: { lat: number; lon: number } | null): Job {
   // Airstrip jobs name a REAL aerodrome — "Newcastle Airport (YWLM)" rather than
   // "the town aerodrome at Newcastle" — and the job sits on that field, not on a
   // random bearing from the town.
-  const aero = tpl.terrain === 'airstrip' ? (AERODROMES[anchor.name]?.length ? rand(AERODROMES[anchor.name]!) : null) : null;
+  // A transfer starts on the referring hospital's helipad.
+  const from = tpl.fromHospital ? referringHospital(anchor, clsMin) : null;
+  if (from) {
+    lat = from.lat;
+    lon = from.lon;
+  }
+  // An airstrip job moves the scene to a real aerodrome, which can sit up to
+  // 60 km from the anchor the credibility check was run against — enough to
+  // land a "fixed-wing retrieval" 9 NM from the Gold Coast. Re-apply the floor
+  // to the aerodrome itself and only use ones that still justify the flight.
+  const aeroPool = !from && tpl.terrain === 'airstrip' ? (AERODROMES[anchor.name] ?? []) : [];
+  const aeroOk = tpl.transport
+    ? aeroPool.filter((a) => {
+        const h = nearestHospital(a.lat, a.lon, tpl.toDefinitiveCare === true);
+        return rngNm(a.lat, a.lon, h.lat, h.lon) >= clsMin;
+      })
+    : aeroPool;
+  const aero = aeroOk.length ? rand(aeroOk) : null;
   if (aero) {
     lat = aero.lat;
     lon = aero.lon;
   }
   const setting = tpl.settings.length ? rand(tpl.settings) : anchor.name;
-  const loc = aero
+  const loc = from
+    ? from.name
+    : aero
     ? `${aero.name} (${aero.icao})`
     : tpl.terrain === 'offshore'
       ? anchor.name
@@ -1188,7 +1336,21 @@ export function generateJob(near?: { lat: number; lon: number } | null): Job {
   const p1 = tpl.p1 + (day.night && tpl.cas ? 0.08 : 0);
   const priority: Priority = x < p1 ? 'P1' : x < p1 + tpl.p2 ? 'P2' : 'P3';
 
-  const transportTo: Hospital | undefined = tpl.transport && chance(0.92) ? nearestHospital(lat, lon) : undefined;
+  // A retrieval flies to a tertiary centre; a scene job goes to the nearest
+  // receiving hospital. Only the scene case needs a credibility floor: if the
+  // hospital is a short drive away then a road ambulance takes it, and there is
+  // no air tasking to generate. A retrieval is never dropped — the flight to
+  // definitive care IS the job.
+  // Most transfers escalate to definitive care, but a meaningful share are
+  // regional-to-regional (Lismore -> Tweed Valley and the like).
+  const regionalTransfer = from && tpl.fromHospital && chance(0.4) ? transferPartner(from, MIN_TRANSPORT_NM[tpl.cls] ?? 0) : null;
+  const candidateHospital = tpl.transport
+    ? (regionalTransfer ?? nearestHospital(lat, lon, tpl.toDefinitiveCare === true))
+    : undefined;
+  const transportNm = candidateHospital ? rngNm(lat, lon, candidateHospital.lat, candidateHospital.lon) : 0;
+  const farEnough = tpl.alwaysTransports || transportNm >= (MIN_TRANSPORT_NM[tpl.cls] ?? 0);
+  const transportTo: Hospital | undefined =
+    candidateHospital && farEnough && (tpl.alwaysTransports || chance(0.92)) ? candidateHospital : undefined;
   const patient = tpl.cas ? makeCasualty(tpl.cas) : undefined;
 
   // Compose the briefing: template lead + patient + a complication + access + weather note.
@@ -1233,8 +1395,8 @@ export function generateJob(near?: { lat: number; lon: number } | null): Job {
     place:
       tpl.terrain === 'offshore'
         ? `${spot.offNm} NM off ${anchor.name}, ${anchor.region}`
-        : `${loc}, ${anchor.region}`,
-    region: anchor.region,
+        : `${loc}, ${from?.region ?? anchor.region}`,
+    region: from?.region ?? anchor.region,
     latLon: dms(lat, lon),
 
     brief: `${day.label[0]!.toUpperCase()}${day.label.slice(1)}: ${rand(tpl.brief)}`,
@@ -1303,6 +1465,8 @@ function inboundRoute(
 
 /** A four-corner racetrack centred on a point (AAR / CAP / adversary orbit). */
 function racetrack(c: { lat: number; lon: number }, lenNm: number, widNm: number, alt: number, spd: number): AirTarget['route'] {
+  // orientation of the pattern itself — arbitrary, and unrelated to where the
+  // task sits, so this one stays a free random bearing.
   const brg = Math.random() * 360;
   const head = project(c.lat, c.lon, brg, lenNm / 2);
   const tail = project(c.lat, c.lon, (brg + 180) % 360, lenNm / 2);
@@ -1320,6 +1484,48 @@ function airwayRoute(base: RaafBase, brg: number, far: number, alt: number, spd:
   const p1 = project(base.lat, base.lon, brg, far * 0.5);
   const p2 = project(base.lat, base.lon, brg, far);
   return [p(p0, Math.round(alt * 0.75), Math.round(spd * 0.85)), p(p1, alt, spd), p(p2, alt, spd)];
+}
+
+/**
+ * A task bearing from a RAAF base that mostly points inland.
+ *
+ * Every build used `Math.random() * 360`, so roughly half of all tasking landed
+ * out to sea — an "AO" pinned in the Coral Sea while the brief named a hinterland
+ * town. `base.sea` is the bearing toward open water, so the reciprocal is land.
+ * A quarter of tasks still go seaward, which is realistic for air defence and
+ * maritime work; those get an honest over-water place name (see aoPlaceName).
+ */
+function aoBearing(base: RaafBase): number {
+  if (chance(0.25)) return Math.random() * 360; // genuinely maritime tasking
+  const inland = base.sea + 180;
+  return (inland + (Math.random() - 0.5) * 150 + 360) % 360;
+}
+
+const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+
+/**
+ * Describe where a task datum actually is. Naming the nearest town is only
+ * honest when there IS a town near it; 130 NM offshore the nearest anchor is
+ * still "Gold Coast hinterland", which is how an ocean pin ended up captioned
+ * as a hinterland job. Beyond 70 NM from any anchor, say it as a bearing and
+ * range from the base instead.
+ */
+function aoPlaceName(base: RaafBase, lat: number, lon: number): string {
+  let best = ANCHORS[0]!;
+  let d = Infinity;
+  for (const a of ANCHORS) {
+    const dd = rngNm(lat, lon, a.lat, a.lon);
+    if (dd < d) {
+      d = dd;
+      best = a;
+    }
+  }
+  if (d <= 70) return best.name;
+  const brg = (Math.atan2(lon - base.lon, lat - base.lat) * 180) / Math.PI;
+  const pt = COMPASS[Math.round(((brg + 360) % 360) / 22.5) % 16];
+  // relative to the base, which the caller already names — "RAAF Amberley AO,
+  // 130 NM E" rather than "... 130 NM E of RAAF Amberley".
+  return `${Math.round(rngNm(base.lat, base.lon, lat, lon))} NM ${pt}`;
 }
 
 function nearestAnchorName(lat: number, lon: number): string {
@@ -1382,7 +1588,7 @@ const THREATS: Record<string, Threat> = {
 };
 
 function intercept(base: RaafBase, t: Threat): { lat: number; lon: number; targets: AirTarget[] } {
-  const brg = Math.random() * 360;
+  const brg = aoBearing(base);
   const far = rint(t.far[0], t.far[1]);
   const alt = rint(Math.round(t.alt[0] / 1000), Math.round(t.alt[1] / 1000)) * 1000;
   const spd = Math.round(rint(t.spd[0], t.spd[1]) / 10) * 10;
@@ -1515,7 +1721,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - CAP station'],
     lz: ['Recovery to base or the tanker'],
     build: (base) => {
-      const brg = Math.random() * 360;
+      const brg = aoBearing(base);
       const c = project(base.lat, base.lon, brg, 60 + Math.random() * 120);
       return { lat: c.lat, lon: c.lon };
     },
@@ -1535,7 +1741,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - training area'],
     lz: ['Recovery to base'],
     build: (base) => {
-      const brg = Math.random() * 360;
+      const brg = aoBearing(base);
       const c = project(base.lat, base.lon, brg, 50 + Math.random() * 90);
       const alt = 24000 + Math.round(Math.random() * 10) * 1000;
       return {
@@ -1560,7 +1766,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - airborne'],
     lz: ['Recovery to base'],
     build: (base) => {
-      const brg = Math.random() * 360;
+      const brg = aoBearing(base);
       const c = project(base.lat, base.lon, brg, 60 + Math.random() * 90);
       return {
         lat: c.lat,
@@ -1584,7 +1790,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - airborne'],
     lz: ['Recovery to base'],
     build: (base) => {
-      const brg = Math.random() * 360;
+      const brg = aoBearing(base);
       const far = 160 + Math.random() * 140;
       const heavy = chance(0.4);
       const datum = project(base.lat, base.lon, brg, far * 0.45);
@@ -1616,7 +1822,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - airborne'],
     lz: ['Recovery to base'],
     build: (base) => {
-      const brg = Math.random() * 360;
+      const brg = aoBearing(base);
       const far = 60 + Math.random() * 80;
       const dz = project(base.lat, base.lon, brg, far);
       const run0 = project(dz.lat, dz.lon, (brg + 180) % 360, 18);
@@ -1649,7 +1855,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - CAS keyhole'],
     lz: ['Recovery to base or the tanker'],
     build: (base) => {
-      const brg = Math.random() * 360;
+      const brg = aoBearing(base);
       const c = project(base.lat, base.lon, brg, 50 + Math.random() * 110);
       return { lat: c.lat, lon: c.lon };
     },
@@ -1668,7 +1874,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - recon track'],
     lz: ['Recovery to base'],
     build: (base) => {
-      const brg = Math.random() * 360;
+      const brg = aoBearing(base);
       const c = project(base.lat, base.lon, brg, 60 + Math.random() * 120);
       return { lat: c.lat, lon: c.lon };
     },
@@ -1728,7 +1934,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - orbit'],
     lz: ['Recovery to base'],
     build: (base) => {
-      const brg = Math.random() * 360;
+      const brg = aoBearing(base);
       const c = project(base.lat, base.lon, brg, 60 + Math.random() * 140);
       return { lat: c.lat, lon: c.lon };
     },
@@ -1747,7 +1953,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['Airfield, ambulances airside'],
     lz: ['Sealed runway'],
     build: (base) => {
-      const brg = Math.random() * 360;
+      const brg = aoBearing(base);
       const c = project(base.lat, base.lon, brg, 80 + Math.random() * 160);
       return { lat: c.lat, lon: c.lon };
     },
@@ -1778,7 +1984,7 @@ export function generateRaafJob(near?: { lat: number; lon: number } | null): Job
   const built = tpl.build(base);
   const [agency, cs] = rand(tpl.agencies);
   const callsign = `${cs} ${rint(1, 4) * 10 + rint(1, 2)}`;
-  const place = nearestAnchorName(built.lat, built.lon);
+  const place = aoPlaceName(base, built.lat, built.lon);
   const day = daypart();
   const ctx: RaafCtx = {
     base: base.name,
