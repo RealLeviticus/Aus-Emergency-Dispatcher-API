@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+*.log
+
+# Desktop app release feed, served by Caddy from /opt/aed-dispatcher/updates.
+# Lives inside this clone on the VPS; never belongs in the repo.
+updates/

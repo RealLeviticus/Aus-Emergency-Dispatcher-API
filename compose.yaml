@@ -1,0 +1,49 @@
+# Isolated from OzServer: an explicit project name gives this stack its own container
+# names, network and (later) volumes. Nothing here is published to a public interface —
+# Caddy on the host is the only thing that reaches port 3100, and only on localhost.
+name: aed-dispatcher
+
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # `environment:` wins over `env_file:`, so a .env copied from .env.example (which sets
+      # NODE_ENV=development) cannot downgrade the container out of production on the VPS.
+      NODE_ENV: production
+      PORT: 3100
+    ports:
+      # Bare-IP mode: exposed directly on the VPS so the app can reach ws://<ip>:3100/ws.
+      # Open port 3100/tcp on the firewall. For a proper hostname + TLS (wss://), change this
+      # back to "127.0.0.1:3100:3100" and put the Caddy block (Caddyfile.snippet) in front.
+      - "3100:3100"
+    networks: [aed-net]
+
+  # --- Enable when persistent GM-placed targets need Postgres -----------------
+  # Add an `aed-internal` network marked `internal: true`, put postgres on it alone, and
+  # add it to the api's network list. Mirrors OzServer's internal/egress split.
+  #
+  # postgres:
+  #   image: postgres:17-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_DB: aed
+  #     POSTGRES_USER: aed
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+  #   volumes:
+  #     - aed-postgres-data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U aed -d aed"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   networks: [aed-internal]
+
+networks:
+  aed-net:
+
+# volumes:
+#   aed-postgres-data:

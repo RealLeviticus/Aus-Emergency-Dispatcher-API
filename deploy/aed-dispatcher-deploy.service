@@ -1,0 +1,14 @@
+[Unit]
+Description=Pull-based deploy for dispatcher-api
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=APP_DIR=/opt/aed-dispatcher
+Environment=BRANCH=main
+Environment=HEALTH_URL=http://127.0.0.1:3100/health
+ExecStart=/opt/aed-dispatcher/deploy/deploy.sh
+# Do not thrash on a broken build; the timer will retry on its normal interval.
+TimeoutStartSec=600

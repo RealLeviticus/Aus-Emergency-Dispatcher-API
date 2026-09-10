@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the dispatcher-api deploy check periodically
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=2min
+# Offset from ozserver-deploy so the two do not fetch/build at the same instant.
+RandomizedDelaySec=30
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

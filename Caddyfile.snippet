@@ -1,0 +1,53 @@
+# Append this to the VPS Caddyfile (the same file that already serves api.ozserver.org),
+# or drop it in a separate file and `import` it. Independent site block — it does not touch
+# the OzServer block.
+#
+# WebSockets need no special handling: Caddy proxies the Upgrade automatically and never
+# buffers a streaming response. `encode` is intentionally left off — it would stall the
+# /ws stream the same way it stalls SSE.
+
+dispatcher.actuallyleviticus.xyz {
+	# --- desktop app update feed ------------------------------------------------
+	# electron-updater polls <this host>/updates/latest.yml and then downloads the
+	# installer named in it. `npm run publish` in the Desktop App scp's both here.
+	#
+	# handle_path strips the /updates prefix, so /updates/latest.yml is served from
+	# /opt/aed-dispatcher/updates/latest.yml.
+	handle_path /updates/* {
+		root * /opt/aed-dispatcher/updates
+		file_server browse
+
+		# The manifest is the only thing that changes meaning between releases, and
+		# a stale one delays every install in the field — keep it barely cached.
+		@manifest path *.yml
+		header @manifest Cache-Control "no-cache"
+
+		# Installers are content-addressed by filename, so they can be cached hard.
+		# Range requests must stay available: differential updates fetch byte
+		# ranges out of the .exe rather than the whole ~80 MB file.
+		@payload path *.exe *.blockmap
+		header @payload Cache-Control "public, max-age=31536000, immutable"
+	}
+
+	# --- realtime sync API ------------------------------------------------------
+	handle {
+		reverse_proxy 127.0.0.1:3100
+	}
+}
+
+# No DNS yet? Serve it on the VPS IP over plain HTTP on a spare port instead:
+#
+# http://:8080 {
+# 	handle_path /updates/* {
+# 		root * /opt/aed-dispatcher/updates
+# 		file_server browse
+# 	}
+# 	handle {
+# 		reverse_proxy 127.0.0.1:3100
+# 	}
+# }
+#
+# Then the app connects to ws://<VPS-IP>:8080/ws (no TLS). Fine for testing; move to the
+# named host with automatic HTTPS before real use. Note that the update feed baked into
+# a build is fixed at package time (electron-builder.yml -> publish.url), so ship builds
+# only once the named host is live.
