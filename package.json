@@ -6,10 +6,11 @@
   "description": "Realtime sync service for Aus Emergency Dispatcher — shared sim-object injection across app users.",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prebake:features": "node scripts/prebake-features.mjs src/features.json"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",

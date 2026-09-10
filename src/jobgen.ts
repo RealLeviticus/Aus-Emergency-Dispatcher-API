@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 /**
  * Server-side tasking generator. Jobs are placed at real Australian locations so
@@ -14,7 +15,13 @@ export type JobPhase = 'enroute' | 'onscene' | 'transport' | 'athospital' | 'ret
 /** Which board a job belongs to: the public emergency pool or the RAAFv pool. */
 export type Channel = 'emergency' | 'raafv';
 
-export type Hospital = { name: string; lat: number; lon: number };
+export type Hospital = {
+  name: string;
+  lat: number;
+  lon: number;
+  /** helipad ident from the MSFS helipad package, when the sim has a pad there */
+  pad?: string;
+};
 
 /** An AI aircraft the job wants spawned (via FSLTL) that flies a set route. */
 export type AirTarget = {
@@ -137,6 +144,8 @@ const ANCHORS: Anchor[] = [
   { name: 'Broome', region: 'WA', lat: -17.95, lon: 122.23, kind: 'remote', sea: 300 },
   { name: 'Hobart', region: 'TAS', lat: -42.84, lon: 147.44, kind: 'regional', sea: 150 },
   { name: 'Launceston', region: 'TAS', lat: -41.44, lon: 147.14, kind: 'regional' },
+  { name: 'Canberra', region: 'ACT', lat: -35.31, lon: 149.13, kind: 'metro' },
+  { name: 'Cooma / Snowy Mountains', region: 'ACT', lat: -36.23, lon: 149.13, kind: 'regional' },
   { name: 'Darwin', region: 'NT', lat: -12.45, lon: 130.95, kind: 'regional', sea: 320 },
   { name: 'Katherine', region: 'NT', lat: -14.46, lon: 132.26, kind: 'remote' },
   { name: 'Alice Springs', region: 'NT', lat: -23.7, lon: 133.87, kind: 'remote' },
@@ -168,6 +177,45 @@ type Terrain = 'road' | 'urban' | 'rural' | 'bush' | 'coast' | 'offshore' | 'air
  * the town, rural/bush jobs are pushed inland, coast jobs sit on the shoreline,
  * offshore jobs are actually out to sea, airstrip jobs are on the field.
  */
+/**
+ * Real map features per anchor, pre-baked from OpenStreetMap by
+ * scripts/prebake-features.mjs. Without this a "level crossing" job was placed
+ * on a random bearing from the town centre and landed in a paddock (or the sea);
+ * snapping to a real crossing or a real road is what makes the scene match the
+ * brief. Missing/empty is handled everywhere — we simply fall back to the old
+ * random placement.
+ */
+type FeatureSet = { xing?: [number, number][]; road?: [number, number][] };
+let FEATURES: Record<string, FeatureSet> = {};
+try {
+  // This package is ESM ("type": "module"), so `require` does not exist — read
+  // the file relative to this module instead. It sits beside jobgen in both
+  // src/ (tsx dev) and dist/ (the build copies it; tsc alone does not).
+  FEATURES = JSON.parse(readFileSync(new URL('./features.json', import.meta.url), 'utf8'));
+} catch {
+  /* not generated yet — placement falls back to the random bearing */
+}
+
+/** Does this anchor have any of the feature a template needs? */
+export function anchorHasFeature(anchorName: string, feature?: 'xing' | 'road'): boolean {
+  if (!feature) return true;
+  return (FEATURES[anchorName]?.[feature]?.length ?? 0) > 0;
+}
+
+/**
+ * Snap to a real feature, with a small jitter so repeat jobs at the same
+ * crossing aren't stacked on the identical pixel.
+ */
+function placeOnFeature(anchor: Anchor, feature: 'xing' | 'road'): { lat: number; lon: number; offNm: number } | null {
+  const list = FEATURES[anchor.name]?.[feature];
+  if (!list?.length) return null;
+  const [lat, lon] = rand(list);
+  const jitterM = feature === 'xing' ? 25 : 60;
+  const dLat = ((Math.random() - 0.5) * 2 * jitterM) / 111320;
+  const dLon = ((Math.random() - 0.5) * 2 * jitterM) / (111320 * Math.cos((lat * Math.PI) / 180));
+  return { lat: lat + dLat, lon: lon + dLon, offNm: 0 };
+}
+
 function placePoint(anchor: Anchor, terrain: Terrain): { lat: number; lon: number; offNm: number } {
   const spread = (deg: number) => (Math.random() - 0.5) * 2 * deg;
   const inland = anchor.sea != null ? anchor.sea + 180 : Math.random() * 360;
@@ -199,66 +247,72 @@ function placePoint(anchor: Anchor, terrain: Terrain): { lat: number; lon: numbe
   }
 }
 
-// ---- real Australian hospital helipads (HEMS receiving sites) -------
-// Approx. helipad coordinates. `ident` only where a public heliport code exists;
-// otherwise the flight plan uses a User point at the real hospital position.
-const HOSPITALS: (Hospital & { region: string })[] = [
-  { name: 'The Alfred Hospital HLS, Melbourne', region: 'VIC', lat: -37.8464, lon: 144.9816 },
-  { name: 'Royal Melbourne Hospital HLS', region: 'VIC', lat: -37.7991, lon: 144.9558 },
-  { name: 'Royal Children’s Hospital HLS, Parkville', region: 'VIC', lat: -37.7951, lon: 144.9508 },
-  { name: 'Monash Medical Centre HLS, Clayton', region: 'VIC', lat: -37.9214, lon: 145.1219 },
-  { name: 'University Hospital Geelong HLS', region: 'VIC', lat: -38.1479, lon: 144.3486 },
-  { name: 'Ballarat Base Hospital HLS', region: 'VIC', lat: -37.5522, lon: 143.8555 },
-  { name: 'Bendigo Health HLS', region: 'VIC', lat: -36.7401, lon: 144.2967 },
-  { name: 'Albury Wodonga Health HLS', region: 'VIC', lat: -36.0793, lon: 146.9179 },
-  { name: 'Latrobe Regional Hospital HLS, Traralgon', region: 'VIC', lat: -38.1843, lon: 146.5072 },
-  { name: 'South West Healthcare HLS, Warrnambool', region: 'VIC', lat: -38.3767, lon: 142.5033 },
-  { name: 'Mildura Base Public Hospital HLS', region: 'VIC', lat: -34.1912, lon: 142.1562 },
-  { name: 'Goulburn Valley Health HLS, Shepparton', region: 'VIC', lat: -36.3719, lon: 145.4012 },
-  { name: 'Royal North Shore Hospital HLS, St Leonards', region: 'NSW', lat: -33.8237, lon: 151.1912 },
-  { name: 'Westmead Hospital HLS', region: 'NSW', lat: -33.8029, lon: 150.9878 },
-  { name: 'Liverpool Hospital HLS', region: 'NSW', lat: -33.9214, lon: 150.9243 },
-  { name: 'Nepean Hospital HLS, Penrith', region: 'NSW', lat: -33.7588, lon: 150.7169 },
-  { name: 'John Hunter Hospital HLS, Newcastle', region: 'NSW', lat: -32.9214, lon: 151.7016 },
-  { name: 'Wollongong Hospital HLS', region: 'NSW', lat: -34.4251, lon: 150.8934 },
-  { name: 'Canberra Hospital HLS, Garran', region: 'NSW', lat: -35.3437, lon: 149.1006 },
-  { name: 'Orange Health Service HLS', region: 'NSW', lat: -33.2712, lon: 149.1042 },
-  { name: 'Wagga Wagga Base Hospital HLS', region: 'NSW', lat: -35.1201, lon: 147.3539 },
-  { name: 'Dubbo Base Hospital HLS', region: 'NSW', lat: -32.2529, lon: 148.6062 },
-  { name: 'Tamworth Rural Referral Hospital HLS', region: 'NSW', lat: -31.0832, lon: 150.9293 },
-  { name: 'Port Macquarie Base Hospital HLS', region: 'NSW', lat: -31.4419, lon: 152.8763 },
-  { name: 'Coffs Harbour Health Campus HLS', region: 'NSW', lat: -30.2969, lon: 153.109 },
-  { name: 'Lismore Base Hospital HLS', region: 'NSW', lat: -28.8213, lon: 153.2764 },
-  { name: 'Griffith Base Hospital HLS', region: 'NSW', lat: -34.2807, lon: 146.0554 },
-  { name: 'Princess Alexandra Hospital HLS, Brisbane', region: 'QLD', lat: -27.4988, lon: 153.0338 },
-  { name: 'Royal Brisbane & Women’s Hospital HLS', region: 'QLD', lat: -27.4491, lon: 153.0281 },
-  { name: 'Gold Coast University Hospital HLS, Southport', region: 'QLD', lat: -27.9581, lon: 153.3829 },
-  { name: 'Sunshine Coast University Hospital HLS, Birtinya', region: 'QLD', lat: -26.762, lon: 153.107 },
-  { name: 'Toowoomba Hospital HLS', region: 'QLD', lat: -27.5482, lon: 151.9388 },
-  { name: 'Bundaberg Hospital HLS', region: 'QLD', lat: -24.8688, lon: 152.3512 },
-  { name: 'Rockhampton Hospital HLS', region: 'QLD', lat: -23.3719, lon: 150.5168 },
-  { name: 'Mackay Base Hospital HLS', region: 'QLD', lat: -21.1499, lon: 149.169 },
-  { name: 'Townsville University Hospital HLS', region: 'QLD', lat: -19.3199, lon: 146.7621 },
-  { name: 'Cairns Hospital HLS', region: 'QLD', lat: -16.9247, lon: 145.7688 },
-  { name: 'Hervey Bay Hospital HLS', region: 'QLD', lat: -25.2908, lon: 152.8362 },
-  { name: 'Royal Adelaide Hospital HLS', region: 'SA', lat: -34.9206, lon: 138.5876 },
-  { name: 'Flinders Medical Centre HLS, Bedford Park', region: 'SA', lat: -35.0188, lon: 138.5669 },
-  { name: 'Lyell McEwin Hospital HLS, Elizabeth Vale', region: 'SA', lat: -34.7124, lon: 138.6773 },
-  { name: 'Mount Gambier Hospital HLS', region: 'SA', lat: -37.8258, lon: 140.7831 },
-  { name: 'Port Augusta Hospital HLS', region: 'SA', lat: -32.5083, lon: 137.7744 },
-  { name: 'Royal Perth Hospital HLS', region: 'WA', lat: -31.9531, lon: 115.8683 },
-  { name: 'Fiona Stanley Hospital HLS, Murdoch', region: 'WA', lat: -32.067, lon: 115.8363 },
-  { name: 'Sir Charles Gairdner Hospital HLS, Nedlands', region: 'WA', lat: -31.9727, lon: 115.8163 },
-  { name: 'Bunbury Regional Hospital HLS', region: 'WA', lat: -33.3512, lon: 115.6432 },
-  { name: 'Geraldton Health Campus HLS', region: 'WA', lat: -28.7863, lon: 114.6292 },
-  { name: 'Kalgoorlie Health Campus HLS', region: 'WA', lat: -30.7662, lon: 121.4562 },
-  { name: 'Broome Hospital HLS', region: 'WA', lat: -17.9602, lon: 122.2212 },
-  { name: 'Hedland Health Campus HLS, Port Hedland', region: 'WA', lat: -20.3132, lon: 118.5932 },
-  { name: 'Royal Hobart Hospital HLS', region: 'TAS', lat: -42.8809, lon: 147.3242 },
-  { name: 'Launceston General Hospital HLS', region: 'TAS', lat: -41.4432, lon: 147.1462 },
-  { name: 'North West Regional Hospital HLS, Burnie', region: 'TAS', lat: -41.0612, lon: 145.8872 },
-  { name: 'Royal Darwin Hospital HLS, Tiwi', region: 'NT', lat: -12.4072, lon: 130.9182 },
-  { name: 'Alice Springs Hospital HLS', region: 'NT', lat: -23.7622, lon: 133.8782 },
+// ---- Australian hospital helipads (HEMS receiving sites) ------------
+// Coordinates are SNAPPED to the helipad in the `simfocus-autogen-helipads-world-2024`
+// package where one exists, so the transport leg always ends somewhere the
+// player can actually put the aircraft down. `pad` is that package's ident.
+//
+// 42 of 56 have a pad. The 14 without one are real hospitals that the sim
+// package simply does not cover (mostly remote WA/NT and a few VIC/NSW
+// regionals); they keep their real-world position and the crew lands on the
+// grounds. Regenerate with scratchpad/gen-hospitals.mjs after a package update.
+const HOSPITALS: (Hospital & { region: string; pad?: string })[] = [
+  { name: 'The Alfred Hospital HLS, Melbourne', region: 'VIC', lat: -37.84525, lon: 144.98131, pad: 'YAFD' },
+  { name: 'Royal Melbourne Hospital HLS', region: 'VIC', lat: -37.79930, lon: 144.95603, pad: 'YRMH' },
+  { name: 'Royal Children’s Hospital HLS, Parkville', region: 'VIC', lat: -37.79405, lon: 144.95131, pad: 'YRHO' },
+  { name: 'Monash Medical Centre HLS, Clayton', region: 'VIC', lat: -37.91960, lon: 145.12401, pad: 'ZS8HW' },
+  { name: 'University Hospital Geelong HLS', region: 'VIC', lat: -38.15151, lon: 144.36593, pad: 'YGEH' },
+  { name: 'Ballarat Base Hospital HLS', region: 'VIC', lat: -37.55912, lon: 143.84568, pad: '7AT0L' },
+  { name: 'Bendigo Health HLS', region: 'VIC', lat: -36.74875, lon: 144.28237, pad: 'S11FM' },
+  { name: 'Albury Wodonga Health HLS', region: 'VIC', lat: -36.07921, lon: 146.93857, pad: 'O5STS' },
+  { name: 'Latrobe Regional Hospital HLS, Traralgon', region: 'VIC', lat: -38.21952, lon: 146.47245, pad: '40CFE' },
+  { name: 'South West Healthcare HLS, Warrnambool', region: 'VIC', lat: -38.37670, lon: 142.50330 },
+  { name: 'Mildura Base Public Hospital HLS', region: 'VIC', lat: -34.18624, lon: 142.14306 },
+  { name: 'Goulburn Valley Health HLS, Shepparton', region: 'VIC', lat: -36.37190, lon: 145.40120 },
+  { name: 'Royal North Shore Hospital HLS, St Leonards', region: 'NSW', lat: -33.82123, lon: 151.19206, pad: 'YRNS' },
+  { name: 'Westmead Hospital HLS', region: 'NSW', lat: -33.80263, lon: 150.99005, pad: 'Y5Y1F' },
+  { name: 'Liverpool Hospital HLS', region: 'NSW', lat: -33.92070, lon: 150.92993, pad: '8FJAD' },
+  { name: 'Nepean Hospital HLS, Penrith', region: 'NSW', lat: -33.75943, lon: 150.71492, pad: '4KC15' },
+  { name: 'John Hunter Hospital HLS, Newcastle', region: 'NSW', lat: -32.92399, lon: 151.69344, pad: 'RYGBR' },
+  { name: 'Wollongong Hospital HLS', region: 'NSW', lat: -34.42452, lon: 150.88297 },
+  { name: 'Canberra Hospital HLS, Garran', region: 'ACT', lat: -35.34386, lon: 149.09995, pad: 'YXCB' },
+  { name: 'Orange Health Service HLS', region: 'NSW', lat: -33.31677, lon: 149.09263, pad: 'Y2XOA' },
+  { name: 'Wagga Wagga Base Hospital HLS', region: 'NSW', lat: -35.11909, lon: 147.35714, pad: 'YXWG' },
+  { name: 'Dubbo Base Hospital HLS', region: 'NSW', lat: -32.23866, lon: 148.62049, pad: 'RXXUH' },
+  { name: 'Tamworth Rural Referral Hospital HLS', region: 'NSW', lat: -31.07215, lon: 150.92664, pad: 'H8TA3' },
+  { name: 'Port Macquarie Base Hospital HLS', region: 'NSW', lat: -31.45233, lon: 152.87667, pad: 'I5I1P' },
+  { name: 'Coffs Harbour Health Campus HLS', region: 'NSW', lat: -30.31703, lon: 153.09221, pad: 'MYARM' },
+  { name: 'Lismore Base Hospital HLS', region: 'NSW', lat: -28.80905, lon: 153.29205, pad: '8MHML' },
+  { name: 'Griffith Base Hospital HLS', region: 'NSW', lat: -34.28202, lon: 146.04394 },
+  { name: 'Princess Alexandra Hospital HLS, Brisbane', region: 'QLD', lat: -27.50017, lon: 153.03368, pad: '49SKB' },
+  { name: 'Royal Brisbane & Women’s Hospital HLS', region: 'QLD', lat: -27.44702, lon: 153.02824, pad: 'YJA8E' },
+  { name: 'Gold Coast University Hospital HLS, Southport', region: 'QLD', lat: -27.95951, lon: 153.38198, pad: 'YXHG' },
+  { name: 'Sunshine Coast University Hospital HLS, Birtinya', region: 'QLD', lat: -26.74732, lon: 153.11368, pad: '82ZHC' },
+  { name: 'Toowoomba Hospital HLS', region: 'QLD', lat: -27.57043, lon: 151.94590, pad: 'CGP32' },
+  { name: 'Bundaberg Hospital HLS', region: 'QLD', lat: -24.86945, lon: 152.33507, pad: '7GTTD' },
+  { name: 'Rockhampton Hospital HLS', region: 'QLD', lat: -23.37963, lon: 150.49520, pad: '5FT2S' },
+  { name: 'Mackay Base Hospital HLS', region: 'QLD', lat: -21.14543, lon: 149.15445, pad: '385DA' },
+  { name: 'Townsville University Hospital HLS', region: 'QLD', lat: -19.32027, lon: 146.76060, pad: 'Y6I9C' },
+  { name: 'Cairns Hospital HLS', region: 'QLD', lat: -16.91148, lon: 145.76892, pad: 'O3SBI' },
+  { name: 'Hervey Bay Hospital HLS', region: 'QLD', lat: -25.29998, lon: 152.82137, pad: 'ZH51B' },
+  { name: 'Royal Adelaide Hospital HLS', region: 'SA', lat: -34.92066, lon: 138.58613, pad: '7F2US' },
+  { name: 'Flinders Medical Centre HLS, Bedford Park', region: 'SA', lat: -35.02002, lon: 138.56858, pad: 'GB8HU' },
+  { name: 'Lyell McEwin Hospital HLS, Elizabeth Vale', region: 'SA', lat: -34.74886, lon: 138.66580, pad: '2LC35' },
+  { name: 'Mount Gambier Hospital HLS', region: 'SA', lat: -37.80526, lon: 140.78690 },
+  { name: 'Port Augusta Hospital HLS', region: 'SA', lat: -32.50999, lon: 137.77593 },
+  { name: 'Royal Perth Hospital HLS', region: 'WA', lat: -31.95368, lon: 115.86654, pad: 'ZXAIJ' },
+  { name: 'Fiona Stanley Hospital HLS, Murdoch', region: 'WA', lat: -32.07057, lon: 115.84688, pad: 'FXCFH' },
+  { name: 'Sir Charles Gairdner Hospital HLS, Nedlands', region: 'WA', lat: -31.96881, lon: 115.81689, pad: 'M6POY' },
+  { name: 'Bunbury Regional Hospital HLS', region: 'WA', lat: -33.36616, lon: 115.64865 },
+  { name: 'Geraldton Health Campus HLS', region: 'WA', lat: -28.78340, lon: 114.61134 },
+  { name: 'Kalgoorlie Health Campus HLS', region: 'WA', lat: -30.74094, lon: 121.47040 },
+  { name: 'Broome Hospital HLS', region: 'WA', lat: -17.96079, lon: 122.23653 },
+  { name: 'Hedland Health Campus HLS, Port Hedland', region: 'WA', lat: -20.41440, lon: 118.59900, pad: 'EF68X' },
+  { name: 'Royal Hobart Hospital HLS', region: 'TAS', lat: -42.87972, lon: 147.33047, pad: '683ZA' },
+  { name: 'Launceston General Hospital HLS', region: 'TAS', lat: -41.44754, lon: 147.14026, pad: 'YXLU' },
+  { name: 'North West Regional Hospital HLS, Burnie', region: 'TAS', lat: -41.04705, lon: 145.88041, pad: 'YBUI' },
+  { name: 'Royal Darwin Hospital HLS, Tiwi', region: 'NT', lat: -12.40720, lon: 130.91820 },
+  { name: 'Alice Springs Hospital HLS', region: 'NT', lat: -23.70618, lon: 133.87826 },
 ];
 
 /** Nearest real hospital helipad to a point (used for the patient-transport leg). */
@@ -272,7 +326,7 @@ function nearestHospital(lat: number, lon: number): Hospital {
       best = h;
     }
   }
-  return { name: best.name, lat: best.lat, lon: best.lon };
+  return { name: best.name, lat: best.lat, lon: best.lon, pad: best.pad };
 }
 
 // ---- op templates ---------------------------------------------------
@@ -290,6 +344,8 @@ type Tpl = {
   category: string;
   cls: AircraftClass;
   agencies: [string, string][]; // [name, callsign]
+  /** snap the job onto a real OSM feature instead of a random bearing */
+  feature?: 'xing' | 'road';
   /** relative weight in the pool (default 1) */
   weight?: number;
   p1: number;
@@ -323,13 +379,44 @@ const HEMS_AGENCIES: [string, string][] = [
   ['CareFlight', 'CareFlight'],
   ['SA Ambulance MedSTAR', 'MedSTAR'],
   ['RAC Rescue (WA)', 'Rescue'],
+  ['Ambulance Tasmania', 'Rescue'],
+  ['ACT Ambulance Service', 'Rescue'],
+];
+
+/**
+ * State and territory POLICE air wings. Every jurisdiction runs its own, so a
+ * job in Perth should say "WA Police Air Wing", not a generic "Police Aviation".
+ */
+const POLICE_AGENCIES: [string, string][] = [
+  ['NSW Police Force PolAir', 'PolAir'],
+  ['Victoria Police Air Wing', 'Polair'],
+  ['Queensland Police Service Polair', 'Polair'],
+  ['Western Australia Police Force Air Wing', 'Polair'],
+  ['SA Police PolAir', 'PolAir'],
+  ['Tasmania Police Air Wing', 'PolAir'],
+  ['NT Police Air Wing', 'PolAir'],
+  ['ACT Policing (AFP)', 'PolAir'],
+];
+
+/** State and territory FIRE services with an aviation arm. */
+const FIRE_AGENCIES: [string, string][] = [
+  ['NSW RFS Aviation', 'Firebird'],
+  ['CFA / FRV Aircraft', 'Firebird'],
+  ['Queensland Fire Department', 'Firebird'],
+  ['DFES Western Australia', 'Firebird'],
+  ['SA Country Fire Service', 'Firebird'],
+  ['Tasmania Fire Service', 'Firebird'],
+  ['NT Fire and Rescue Service', 'Firebird'],
+  ['ACT Rural Fire Service', 'Firebird'],
+  ['National Aerial Firefighting', 'Bomber'],
 ];
 
 // Where each agency actually operates (`'*'` = national). Adjacent states can
 // appear as a border-town exception.
 const REGION_ADJ: Record<string, string[]> = {
   VIC: ['NSW', 'SA', 'TAS'],
-  NSW: ['VIC', 'QLD', 'SA'],
+  NSW: ['VIC', 'QLD', 'SA', 'ACT'],
+  ACT: ['NSW'],
   QLD: ['NSW', 'NT', 'SA'],
   SA: ['VIC', 'NSW', 'QLD', 'NT', 'WA'],
   WA: ['SA', 'NT'],
@@ -347,8 +434,28 @@ const AGENCY_REGIONS: Record<string, string[] | '*'> = {
   CareFlight: ['NSW', 'NT'],
   'SA Ambulance MedSTAR': ['SA'],
   'RAC Rescue (WA)': ['WA'],
+  'Ambulance Tasmania': ['TAS'],
+  'ACT Ambulance Service': ['ACT'],
+
+  // police air wings — one per jurisdiction
+  'NSW Police Force PolAir': ['NSW', 'ACT'],
+  'Victoria Police Air Wing': ['VIC'],
+  'Queensland Police Service Polair': ['QLD'],
+  'Western Australia Police Force Air Wing': ['WA'],
+  'SA Police PolAir': ['SA'],
+  'Tasmania Police Air Wing': ['TAS'],
+  'NT Police Air Wing': ['NT'],
+  'ACT Policing (AFP)': ['ACT'],
+
+  // fire services with an aviation arm
   'NSW RFS Aviation': ['NSW'],
   'CFA / FRV Aircraft': ['VIC'],
+  'Queensland Fire Department': ['QLD'],
+  'DFES Western Australia': ['WA'],
+  'SA Country Fire Service': ['SA'],
+  'Tasmania Fire Service': ['TAS'],
+  'NT Fire and Rescue Service': ['NT'],
+  'ACT Rural Fire Service': ['ACT'],
   'Royal Flying Doctor Service': '*',
   'Police Aviation': '*',
   'National Aerial Firefighting': '*',
@@ -372,7 +479,12 @@ function pickAgency(list: [string, string][], region: string): [string, string] 
   });
   if (home.length && (!adj.length || Math.random() > 0.15)) return rand(home);
   if (adj.length) return rand(adj);
-  return rand(home.length ? home : list);
+  if (home.length) return rand(home);
+  // Nothing in this scenario's list operates here. Prefer a national body over
+  // an interstate one — "RFDS" in the Kimberley reads fine, "Ambulance
+  // Victoria" does not.
+  const national = list.filter((a) => AGENCY_REGIONS[a[0]] === '*');
+  return rand(national.length ? national : list);
 }
 
 // ---- composition fragments -----------------------------------------
@@ -502,6 +614,7 @@ const ACCESS_NOTES = [
 const TEMPLATES: Tpl[] = [
   {
     kind: 'MVA with entrapment',
+    feature: 'road',
     category: 'HEMS / trauma',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -605,6 +718,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Level crossing — train vs vehicle',
+    feature: 'xing',
     category: 'HEMS / trauma',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -625,6 +739,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Bus / coach rollover — multi-casualty',
+    feature: 'road',
     category: 'HEMS / trauma',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -646,7 +761,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Search / offender containment',
     category: 'Police aviation',
     cls: 'rotary',
-    agencies: [['Police Aviation', 'PolAir']],
+    agencies: POLICE_AGENCIES,
     p1: 0.3,
     p2: 0.5,
     anchorKinds: ['metro', 'regional'],
@@ -664,7 +779,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Missing person — bushland search',
     category: 'Police aviation',
     cls: 'rotary',
-    agencies: [['Police Aviation', 'PolAir'], ['National Parks / DBCA', 'Ranger'], ['AMSA / JRCC Australia', 'Rescue']],
+    agencies: [...POLICE_AGENCIES, ['National Parks / DBCA', 'Ranger'], ['AMSA / JRCC Australia', 'Rescue']],
     p1: 0.4,
     p2: 0.45,
     anchorKinds: ['regional', 'remote'],
@@ -742,6 +857,7 @@ const TEMPLATES: Tpl[] = [
   },
   {
     kind: 'Powerline strike / electrocution',
+    feature: 'road',
     category: 'HEMS / trauma',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -764,7 +880,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Fire reconnaissance / crew insertion',
     category: 'Firefighting support',
     cls: 'rotary',
-    agencies: [['NSW RFS Aviation', 'Firebird'], ['CFA / FRV Aircraft', 'Firebird'], ['National Parks / DBCA', 'Ranger']],
+    agencies: [...FIRE_AGENCIES, ['National Parks / DBCA', 'Ranger']],
     weight: 2,
     p1: 0.3,
     p2: 0.5,
@@ -783,7 +899,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Storm damage — SES air support',
     category: 'Firefighting support',
     cls: 'rotary',
-    agencies: [['Police Aviation', 'PolAir'], ['NSW RFS Aviation', 'Firebird'], ['National Parks / DBCA', 'Ranger']],
+    agencies: [...POLICE_AGENCIES, ...FIRE_AGENCIES, ['National Parks / DBCA', 'Ranger']],
     p1: 0.15,
     p2: 0.45,
     anchorKinds: ['regional', 'coastal'],
@@ -923,7 +1039,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Fire mapping / air attack supervision',
     category: 'Firefighting (fixed wing)',
     cls: 'fixed',
-    agencies: [['National Aerial Firefighting', 'Bomber'], ['NSW RFS Aviation', 'Firebird'], ['Aerial Survey Operations', 'Survey']],
+    agencies: [...FIRE_AGENCIES, ['Aerial Survey Operations', 'Survey']],
     weight: 2,
     p1: 0.2,
     p2: 0.5,
@@ -1024,8 +1140,15 @@ export function generateJob(near?: { lat: number; lon: number } | null): Job {
       pool = nearest.slice(0, 1);
     }
   }
+  // A template that needs a real feature (a rail crossing, a road) can only run
+  // where one exists — otherwise you get a level crossing near Broome, which has
+  // no railway at all.
+  if (tpl.feature) {
+    const able = pool.filter((a) => anchorHasFeature(a.name, tpl.feature));
+    if (able.length) pool = able;
+  }
   const anchor = rand(pool.length ? pool : ANCHORS);
-  const spot = placePoint(anchor, tpl.terrain);
+  const spot = (tpl.feature && placeOnFeature(anchor, tpl.feature)) || placePoint(anchor, tpl.terrain);
   const lat = spot.lat;
   const lon = spot.lon;
   const [agencyName] = pickAgency(tpl.agencies, anchor.region);
