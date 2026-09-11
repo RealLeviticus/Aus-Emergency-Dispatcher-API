@@ -1,6 +1,10 @@
 node_modules
 dist
 .env
+# Timestamped copies made before editing .env on the VPS. `.env` alone is an
+# exact match and does not cover them, so a backup full of secrets showed up as
+# an untracked file inside the deployed worktree.
+.env.bak.*
 *.log
 
 # Desktop app release feed, served by Caddy from /opt/aed-dispatcher/updates.
