@@ -219,6 +219,24 @@ try {
   /* not generated yet — placement falls back to the random bearing */
 }
 
+/**
+ * The airport that serves each hospital, for fixed-wing aeromedical.
+ *
+ * Chosen by runway length rather than by tags: Caloundra and Lake Macquarie
+ * both carry IATA codes but are GA strips, and an "airport-ness" heuristic
+ * picked them over Sunshine Coast and Newcastle.
+ */
+type ServingAirport = { name: string; icao: string; lat: number; lon: number };
+let HOSPITAL_AIRPORTS: Record<string, ServingAirport> = {};
+try {
+  HOSPITAL_AIRPORTS = JSON.parse(readFileSync(new URL('./hospital-airports.json', import.meta.url), 'utf8'));
+} catch {
+  /* not generated yet — fixed-wing jobs fall back to naming the hospital */
+}
+function airportFor(hospitalName: string): ServingAirport | null {
+  return HOSPITAL_AIRPORTS[hospitalName] ?? null;
+}
+
 /** Real aerodromes near each anchor, with their ICAO code (same pre-bake). */
 type Aerodrome = { name: string; icao: string; lat: number; lon: number };
 let AERODROMES: Record<string, Aerodrome[]> = {};
@@ -1502,10 +1520,27 @@ function buildJob(
   const candidateHospital = tpl.transport
     ? (regionalTransfer ?? nearestHospital(lat, lon, tpl.toDefinitiveCare === true))
     : undefined;
-  const transportNm = candidateHospital ? rngNm(lat, lon, candidateHospital.lat, candidateHospital.lon) : 0;
+  // A fixed-wing aircraft cannot land on a hospital helipad. An RFDS flight
+  // goes airport to airport and the patient finishes by road, so the point the
+  // aircraft actually flies to is the airport serving that hospital — and that
+  // is what the destination marker, the distance and the GPS export must use.
+  const arrival = candidateHospital && tpl.cls === 'fixed' ? airportFor(candidateHospital.name) : null;
+  const destination: Hospital | undefined = candidateHospital
+    ? arrival
+      ? { name: `${arrival.name} (${arrival.icao})`, lat: arrival.lat, lon: arrival.lon }
+      : candidateHospital
+    : undefined;
+
+  const transportNm = destination ? rngNm(lat, lon, destination.lat, destination.lon) : 0;
   const farEnough = tpl.alwaysTransports || transportNm >= (MIN_TRANSPORT_NM[tpl.cls] ?? 0);
   const transportTo: Hospital | undefined =
-    candidateHospital && farEnough && (tpl.alwaysTransports || chance(0.92)) ? candidateHospital : undefined;
+    destination && farEnough && (tpl.alwaysTransports || chance(0.92)) ? destination : undefined;
+  // What the briefing calls the destination: the airfield, then the road leg.
+  const destinationText = transportTo
+    ? arrival && candidateHospital
+      ? `${arrival.name} (${arrival.icao}), then by road to ${candidateHospital.name}`
+      : transportTo.name
+    : undefined;
   const patient = tpl.cas ? makeCasualty(tpl.cas) : undefined;
 
   // Pick the LZ first: the briefing has to agree with it.
@@ -1519,7 +1554,7 @@ function buildJob(
   // Compose the briefing: template lead + patient + a complication + access + weather note.
   const compPool = [...(tpl.complications ?? []), ...COMPLICATIONS];
   const parts = [
-    tpl.detail({ loc, town: anchor.name, region: anchor.region, hospital: transportTo?.name, night: day.night }),
+    tpl.detail({ loc, town: anchor.name, region: anchor.region, hospital: destinationText, night: day.night }),
     patient ? `Patient: ${patient}` : '',
     chance(0.7) ? rand(compPool) : '',
     landsOnScene && chance(0.7) ? rand(ACCESS_NOTES) : '',
