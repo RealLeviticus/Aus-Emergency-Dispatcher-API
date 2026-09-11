@@ -1145,6 +1145,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Neonatal / Paediatric Retrieval',
     toDefinitiveCare: true,
     alwaysTransports: true,
+    fromHospital: true,
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['NSW Air Ambulance', 'Ambulance'], ['Ambulance Victoria', 'Ambulance'], ['Royal Flying Doctor Service', 'Flying Doctor']],
@@ -1189,6 +1190,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Burns — Inter-Hospital Transfer',
     toDefinitiveCare: true,
     alwaysTransports: true,
+    fromHospital: true,
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor'], ['Ambulance Victoria', 'Ambulance'], ['NSW Air Ambulance', 'Ambulance']],
@@ -1243,6 +1245,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Inter-Hospital Transfer (Fixed Wing)',
     toDefinitiveCare: true,
     alwaysTransports: true,
+    fromHospital: true,
     category: 'Critical care transfer',
     cls: 'fixed',
     agencies: [['Royal Flying Doctor Service', 'Flying Doctor'], ['Ambulance Victoria', 'Ambulance'], ['NSW Air Ambulance', 'Ambulance']],
@@ -1464,9 +1467,15 @@ function buildJob(
   // random bearing from the town.
   // A transfer starts on the referring hospital's helipad.
   const from = tpl.fromHospital ? referringHospital(anchor, clsMin) : null;
+  // A bed-to-bed transfer starts at a bed. For rotary that is the referring
+  // hospital's helipad; for fixed wing the aircraft cannot get to the bed, so
+  // it departs the airport serving that hospital and the patient comes out by
+  // road. Without this the departure end named no hospital at all — "bed-to-bed
+  // transfer from RAAF Base East Sale" — while the arrival end named one.
+  const departure = from && tpl.cls === 'fixed' ? airportFor(from.name) : null;
   if (from) {
-    lat = from.lat;
-    lon = from.lon;
+    lat = departure ? departure.lat : from.lat;
+    lon = departure ? departure.lon : from.lon;
   }
   // An airstrip job moves the scene to a real aerodrome, which can sit up to
   // 60 km from the anchor the credibility check was run against — enough to
@@ -1492,7 +1501,9 @@ function buildJob(
     lon = aero.lon;
   }
   const loc = from
-    ? from.name
+    ? departure
+      ? `${from.name} via ${departure.name} (${departure.icao})`
+      : from.name
     : aero
     ? `${aero.name} (${aero.icao})`
     : tpl.terrain === 'offshore'
@@ -1516,7 +1527,14 @@ function buildJob(
   // definitive care IS the job.
   // Most transfers escalate to definitive care, but a meaningful share are
   // regional-to-regional (Lismore -> Tweed Valley and the like).
-  const regionalTransfer = from && tpl.fromHospital && chance(0.4) ? transferPartner(from, MIN_TRANSPORT_NM[tpl.cls] ?? 0) : null;
+  // Regional-to-regional transfers are a rotary thing: Lismore to Tweed Valley
+  // is 36 NM and routine. A fixed-wing transfer is an escalation to definitive
+  // care — flying a major burns patient to a small rural hospital, as this did
+  // once burns became a hospital-origin job, is not a transfer anyone makes.
+  const regionalTransfer =
+    from && tpl.fromHospital && tpl.cls === 'rotary' && chance(0.4)
+      ? transferPartner(from, MIN_TRANSPORT_NM[tpl.cls] ?? 0)
+      : null;
   const candidateHospital = tpl.transport
     ? (regionalTransfer ?? nearestHospital(lat, lon, tpl.toDefinitiveCare === true))
     : undefined;
@@ -1535,6 +1553,11 @@ function buildJob(
   const farEnough = tpl.alwaysTransports || transportNm >= (MIN_TRANSPORT_NM[tpl.cls] ?? 0);
   const transportTo: Hospital | undefined =
     destination && farEnough && (tpl.alwaysTransports || chance(0.92)) ? destination : undefined;
+  // A fixed-wing transfer has to be a flight. If the referring hospital has no
+  // airport, or both hospitals are served by the SAME one, there is nothing to
+  // fly — re-roll rather than brief "from Moorabbin to Moorabbin".
+  if (strict && tpl.cls === 'fixed' && from && (!departure || (arrival && arrival.icao === departure.icao))) return null;
+
   // What the briefing calls the destination: the airfield, then the road leg.
   const destinationText = transportTo
     ? arrival && candidateHospital
