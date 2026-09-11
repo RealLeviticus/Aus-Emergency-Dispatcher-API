@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { hasRoadGraph, pursuitRoute, syntheticRoute, type FleeProfile } from './roads.js';
+import { AAR_ANCHORS, REFUELLING_TRACKS, type RefuellingTrack, type Waypoint } from './airspace.js';
 import {
   availabilityAt,
   HOME_BASES,
@@ -2710,6 +2711,54 @@ function dryBaseFrom(base: RaafBase): RaafBase | null {
   return pool.length ? rand(pool.slice(0, 4)) : null;
 }
 
+/**
+ * The refuelling track a base would actually use — the one whose rendezvous
+ * control point is nearest.
+ *
+ * Australia refuels on eight published tracks, so "somewhere on a random
+ * bearing 60-150 NM out" was never right. The tanker now flies a real one and
+ * the brief can name it.
+ */
+function trackFor(base: RaafBase): RefuellingTrack {
+  let best = REFUELLING_TRACKS[0]!;
+  let d = Infinity;
+  for (const t of REFUELLING_TRACKS) {
+    const rvcp = t.points.find((p2) => p2.id === t.rvcp) ?? t.points[0]!;
+    const dd = rngNm(base.lat, base.lon, rvcp.lat, rvcp.lon);
+    if (dd < d) {
+      d = dd;
+      best = t;
+    }
+  }
+  return best;
+}
+
+/** A named waypoint on a track. */
+function wpt(track: RefuellingTrack, id: string): Waypoint {
+  return track.points.find((p2) => p2.id === id) ?? track.points[0]!;
+}
+
+/**
+ * The AAR/AEW&C anchor airspace serving a base. Keyed by the base's own name
+ * where the handbook publishes one; otherwise the nearest published set, since
+ * a squadron without its own anchor airspace still has to orbit somewhere.
+ */
+function anchorsFor(base: RaafBase): Waypoint[] {
+  const own = AAR_ANCHORS[base.name.replace(/^(RAAFv Base |vDefence Establishment )/, '')];
+  if (own?.length) return own;
+  let best: Waypoint[] = [];
+  let d = Infinity;
+  for (const pts of Object.values(AAR_ANCHORS)) {
+    if (!pts.length) continue;
+    const dd = rngNm(base.lat, base.lon, pts[0]!.lat, pts[0]!.lon);
+    if (dd < d) {
+      d = dd;
+      best = pts;
+    }
+  }
+  return best;
+}
+
 // -- threat profiles for intercept tasking ---------------------------
 type Threat = {
   label: (fl: number) => string;
@@ -2776,6 +2825,16 @@ type RaafCtx = {
   dest: string;
   /** the base's local training airspace, in words */
   area: string;
+  /** published refuelling track and its points, for AAR tasking */
+  track: string;
+  rvip: string;
+  rvcp: string;
+  navChk: string;
+  exitPt: string;
+  block: string;
+  freq: string;
+  /** published anchor waypoint, for AEW&C tasking */
+  anchor: string;
 };
 
 type RaafTpl = {
@@ -2812,6 +2871,10 @@ type RaafTpl = {
     targets?: AirTarget[];
     range?: string;
     dest?: string;
+    /** a published refuelling track, when the task is flown on one */
+    track?: RefuellingTrack;
+    /** a published anchor waypoint, when the task orbits one */
+    anchor?: string;
   };
 };
 
@@ -2983,25 +3046,28 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     p2: 0.45,
     brief: ['Establish the towline, receivers inbound.', 'Pre-planned AAR bracket - fighters need fuel.'],
     detail: (c) =>
-      `Take the ${c.type} from ${c.base} to the AAR towline near ${c.place}. Establish the racetrack in the assigned block, hold height and speed steady while the receivers cycle through, and pass the planned offload. ${c.controller} has the block. Fighters will join from below and behind - do not manoeuvre once they are in contact.`,
+      `Take the ${c.type} from ${c.base} to ${c.track}. Join at ${c.rvip}, set up on the track at ${c.rvcp} in the ${c.block} block, and run it via ${c.navChk} to ${c.exitPt}. Hold height and speed steady while the receivers cycle through and pass the planned offload. Refuelling frequency ${c.freq}, ${c.controller} has the block. Fighters join from below and behind - do not manoeuvre once they are in contact.`,
     hazards: ['Receivers in close formation, wake, cloud in the block', 'Long time in the block, fuel planning for the offload'],
-    access: ['N/A - airborne'],
+    access: ['N/A - published refuelling track'],
     lz: ['Recovery to base'],
     timeline: () => 'On the towline by the briefed bracket time - the receivers plan their fuel around it.',
     build: (base) => {
-      const brg = aoBearing(base);
-      const c = project(base.lat, base.lon, brg, 60 + Math.random() * 90);
-      const alt = 24000 + Math.round(Math.random() * 4) * 1000;
+      const track = trackFor(base);
+      const rvcp = wpt(track, track.rvcp);
+      // Fly the published track rather than a racetrack on a random bearing.
+      const alt = chance(0.5) ? 25000 : 30000;
+      const legs = track.points.map((w) => p(w, alt, 290));
       return {
-        lat: c.lat,
-        lon: c.lon,
+        lat: rvcp.lat,
+        lon: rvcp.lon,
+        track,
         targets: [
           {
             label: `Receivers - fighter pair, FL${Math.round(alt / 100)}`,
             titleHint: 'jet',
             formation: 2,
             holdUntilNm: 70,
-            route: racetrack(c, 30, 10, alt, 300),
+            route: legs,
             loop: true,
           },
         ],
@@ -3174,15 +3240,20 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     p2: 0.35,
     brief: ['Establish an AEW&C orbit over the AO.', 'Provide the recognised air picture for the exercise.'],
     detail: (c) =>
-      `Depart ${c.base} in the ${c.type} and set up an AEW&C orbit over the area near ${c.place}. Build and pass the recognised air picture, control the fighters and the tanker, and remain on station until relieved. ${c.controller} takes hand-over.`,
+      `Depart ${c.base} in the ${c.type} and set up an AEW&C orbit anchored on ${c.anchor}, near ${c.place}. Build and pass the recognised air picture, control the fighters and the tanker, and remain on station until relieved. ${c.controller} takes hand-over.`,
     hazards: ['Long endurance, other high-level traffic', 'Weather and turbulence at height'],
     access: ['N/A - orbit'],
     lz: ['Recovery to base'],
     timeline: () => 'On station for the start of the vul - everyone else plans around your picture.',
     build: (base) => {
-      const brg = aoBearing(base);
-      const c = project(base.lat, base.lon, brg, 60 + Math.random() * 140);
-      return { lat: c.lat, lon: c.lon };
+      // The E-7A works the same published airspace as the tankers.
+      const pts = anchorsFor(base);
+      const a = pts.length ? rand(pts) : null;
+      if (!a) {
+        const c = project(base.lat, base.lon, aoBearing(base), 60 + Math.random() * 140);
+        return { lat: c.lat, lon: c.lon };
+      }
+      return { lat: a.lat, lon: a.lon, anchor: a.id };
     },
   },
   {
@@ -3436,8 +3507,9 @@ export function generateRaafJob(near?: { lat: number; lon: number } | null): Job
     // Air defence tasking talks to the control and reporting units; everyone
     // else talks to the area centre. One shared list had Sector (Air Defence)
     // routing an aeromedical flight.
-    controller:
-      tpl.category === 'Air defence'
+    controller: built.track
+      ? built.track.centre
+      : tpl.category === 'Air defence'
         ? rand(['Sector (Air Defence)', 'Eastern RADAR', 'Northern RADAR', 'the AOCC'])
         : rand(['Brisbane Centre', 'Melbourne Centre', 'the AOCC', 'the area controller']),
     roe: rand([
@@ -3452,6 +3524,14 @@ export function generateRaafJob(near?: { lat: number; lon: number } | null): Job
     range: built.range ?? rangeFor(base).name,
     dest: built.dest ?? (destField ? `${destField.name} (${destField.icao})` : where.phrase),
     area: `the ${base.name.replace(/^(RAAFv Base |vDefence Establishment )/, '')} training area`,
+    track: built.track ? `refuelling track ${built.track.name}` : 'the assigned towline',
+    rvip: built.track?.rvip ?? 'the RVIP',
+    rvcp: built.track?.rvcp ?? 'the RVCP',
+    navChk: built.track?.navChk ?? 'the nav check point',
+    exitPt: built.track?.exit ?? 'the exit point',
+    block: built.track?.altitudes ?? 'assigned',
+    freq: built.track?.freq ?? 'as assigned',
+    anchor: built.anchor ?? 'the assigned point',
   };
   const jobRegion = regionAt(built.lat, built.lon, base.region);
   const x = Math.random();
