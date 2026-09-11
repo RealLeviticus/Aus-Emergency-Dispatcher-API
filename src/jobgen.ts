@@ -145,7 +145,7 @@ const ANCHORS: Anchor[] = [
   { name: 'Hobart', region: 'TAS', lat: -42.84, lon: 147.44, kind: 'regional', sea: 150 },
   { name: 'Launceston', region: 'TAS', lat: -41.44, lon: 147.14, kind: 'regional' },
   { name: 'Canberra', region: 'ACT', lat: -35.31, lon: 149.13, kind: 'metro' },
-  { name: 'Cooma / Snowy Mountains', region: 'ACT', lat: -36.23, lon: 149.13, kind: 'regional' },
+  { name: 'Cooma / Snowy Mountains', region: 'NSW', lat: -36.23, lon: 149.13, kind: 'regional' },
   { name: 'Darwin', region: 'NT', lat: -12.45, lon: 130.95, kind: 'regional', sea: 320 },
   { name: 'Katherine', region: 'NT', lat: -14.46, lon: 132.26, kind: 'remote' },
   { name: 'Alice Springs', region: 'NT', lat: -23.7, lon: 133.87, kind: 'remote' },
@@ -185,7 +185,30 @@ type Terrain = 'road' | 'urban' | 'rural' | 'bush' | 'coast' | 'offshore' | 'air
  * brief. Missing/empty is handled everywhere — we simply fall back to the old
  * random placement.
  */
-type FeatureSet = { xing?: [number, number][]; road?: [number, number][] };
+/** The map features a job setting can name. Pre-baked per anchor from OSM. */
+export type FeatureKind =
+  | 'xing'
+  | 'rail'
+  | 'majorroad'
+  | 'river'
+  | 'water'
+  | 'powerline'
+  | 'pipeline'
+  | 'roadhouse'
+  | 'caravan'
+  | 'residential'
+  | 'industrial'
+  | 'retail'
+  | 'farmland'
+  | 'forest'
+  | 'reserve'
+  | 'park'
+  | 'construction'
+  | 'quarry'
+  | 'marina'
+  | 'beach'
+  | 'cliff';
+type FeatureSet = Partial<Record<FeatureKind, [number, number][]>>;
 let FEATURES: Record<string, FeatureSet> = {};
 try {
   // This package is ESM ("type": "module"), so `require` does not exist — read
@@ -206,23 +229,71 @@ try {
 }
 
 /** Does this anchor have any of the feature a template needs? */
-export function anchorHasFeature(anchorName: string, feature?: 'xing' | 'road'): boolean {
+export function anchorHasFeature(anchorName: string, feature?: FeatureKind): boolean {
   if (!feature) return true;
   return (FEATURES[anchorName]?.[feature]?.length ?? 0) > 0;
 }
 
 /**
- * Snap to a real feature, with a small jitter so repeat jobs at the same
- * crossing aren't stacked on the identical pixel.
+ * A job that lands ON a line — a road, a railway, a river bank — must not be
+ * nudged off it. The old code jittered every feature by 60 m, which is how an
+ * "MVA on a bypass road" ended up inside a building in the Toowoomba CBD. The
+ * measured offset of the map data itself is ~9 m, so the jitter was the whole
+ * problem. Areas can still be spread a little: one end of a suburb is as
+ * plausible as the other.
  */
-function placeOnFeature(anchor: Anchor, feature: 'xing' | 'road'): { lat: number; lon: number; offNm: number } | null {
+const LINEAR: ReadonlySet<FeatureKind> = new Set<FeatureKind>(['majorroad', 'rail', 'river', 'powerline', 'pipeline', 'xing']);
+
+/** Snap to a real feature of this kind near the anchor. */
+function placeOnFeature(anchor: Anchor, feature: FeatureKind): { lat: number; lon: number; offNm: number } | null {
   const list = FEATURES[anchor.name]?.[feature];
   if (!list?.length) return null;
   const [lat, lon] = rand(list);
-  const jitterM = feature === 'xing' ? 25 : 60;
+  const jitterM = LINEAR.has(feature) ? 0 : 120;
+  if (!jitterM) return { lat, lon, offNm: 0 };
   const dLat = ((Math.random() - 0.5) * 2 * jitterM) / 111320;
   const dLon = ((Math.random() - 0.5) * 2 * jitterM) / (111320 * Math.cos((lat * Math.PI) / 180));
   return { lat: lat + dLat, lon: lon + dLon, offNm: 0 };
+}
+
+/**
+ * What each setting phrase actually IS on the map.
+ *
+ * Every template already described its scene precisely — "a residential area",
+ * "a catchment", "a bypass road" — but the phrase and the coordinate used to be
+ * drawn independently, so the words were decoration and the pin went on a
+ * random bearing from the town. This table is what ties them together: the
+ * setting is chosen first, and the job is then placed on a real one.
+ *
+ * Order matters — first match wins.
+ */
+const SETTING_FEATURE: [RegExp, FeatureKind][] = [
+  [/level crossing|rail crossing|grain-line/i, 'xing'],
+  [/rail corridor|rail maintenance|railway/i, 'rail'],
+  [/highway|freeway|arterial|bypass|truck route|mountain pass|descent|interchange/i, 'majorroad'],
+  [/roadhouse/i, 'roadhouse'],
+  [/caravan park/i, 'caravan'],
+  [/industrial estate/i, 'industrial'],
+  [/town centre/i, 'retail'],
+  [/residential|suburban/i, 'residential'],
+  [/parkland|sports oval|showground/i, 'park'],
+  [/national park|state forest|forest|timbered|bushland|forestry|scrub/i, 'forest'],
+  [/reserve|ranges?\b|gullies|fire trail/i, 'reserve'],
+  [/catchment|reservoir|\bdam\b|\blake\b|weir/i, 'water'],
+  [/river|creek|causeway|swollen|floodwater|flood-/i, 'river'],
+  [/marina|jetty|boat ramp|slipway|dive charter/i, 'marina'],
+  [/beach|foreshore|sand/i, 'beach'],
+  [/cliff|rock platform|headland|bluff/i, 'cliff'],
+  [/construction site/i, 'construction'],
+  [/mine camp|quarry|\bmine\b/i, 'quarry'],
+  [/powerline|easement|transmission/i, 'powerline'],
+  [/pipeline/i, 'pipeline'],
+  [/grazing|cropping|paddock|farm|station|shearing|rural block|stubble|orchard|irrigator|homestead|outstation|bore run/i, 'farmland'],
+];
+
+function featureForSetting(setting: string): FeatureKind | null {
+  for (const [re, kind] of SETTING_FEATURE) if (re.test(setting)) return kind;
+  return null;
 }
 
 function placePoint(anchor: Anchor, terrain: Terrain): { lat: number; lon: number; offNm: number } {
@@ -370,7 +441,7 @@ type Tpl = {
   cls: AircraftClass;
   agencies: [string, string][]; // [name, callsign]
   /** snap the job onto a real OSM feature instead of a random bearing */
-  feature?: 'xing' | 'road';
+  feature?: FeatureKind;
   /** relative weight in the pool (default 1) */
   weight?: number;
   p1: number;
@@ -454,6 +525,22 @@ const FIRE_AGENCIES: [string, string][] = [
   ['National Aerial Firefighting', 'Bomber'],
 ];
 
+/**
+ * State and territory PARKS / conservation services. DBCA is Western
+ * Australia's department — it was previously listed as the national parks
+ * agency, which put a WA ranger on a South Australian catchment survey.
+ */
+const PARKS_AGENCIES: [string, string][] = [
+  ['NSW National Parks and Wildlife Service', 'Ranger'],
+  ['Parks Victoria', 'Ranger'],
+  ['Queensland Parks and Wildlife Service', 'Ranger'],
+  ['Parks and Wildlife Service (DBCA)', 'Ranger'],
+  ['National Parks and Wildlife Service SA', 'Ranger'],
+  ['Tasmania Parks and Wildlife Service', 'Ranger'],
+  ['NT Parks and Wildlife', 'Ranger'],
+  ['ACT Parks and Conservation Service', 'Ranger'],
+];
+
 // Where each agency actually operates (`'*'` = national). Adjacent states can
 // appear as a border-town exception.
 const REGION_ADJ: Record<string, string[]> = {
@@ -506,28 +593,71 @@ const AGENCY_REGIONS: Record<string, string[] | '*'> = {
   'JRCC Australia': '*',
   'Australian Border Force': '*',
   'Marine Rescue': '*',
-  'National Parks / DBCA': '*',
+  'NSW National Parks and Wildlife Service': ['NSW'],
+  'Parks Victoria': ['VIC'],
+  'Queensland Parks and Wildlife Service': ['QLD'],
+  'Parks and Wildlife Service (DBCA)': ['WA'],
+  'National Parks and Wildlife Service SA': ['SA'],
+  'Tasmania Parks and Wildlife Service': ['TAS'],
+  'NT Parks and Wildlife': ['NT'],
+  'ACT Parks and Conservation Service': ['ACT'],
   'Aerial Survey Operations': '*',
 };
 
-/** Pick an agency that actually covers this region (with a small border-town chance). */
-function pickAgency(list: [string, string][], region: string): [string, string] {
+/**
+ * Which anchors are genuinely close to another jurisdiction (within 150 km of
+ * its boundary), so a cross-border tasking reads as a real border arrangement.
+ *
+ * The interstate exception used to apply to any anchor in the state, which put
+ * Queensland Parks and Wildlife on a catchment at Bega — 900 km away. Generated
+ * from the state boundaries; Bass Strait is excluded because it is not a border
+ * anyone gets tasked across.
+ */
+const ANCHOR_BORDERS: Record<string, string[]> = {
+  'Bendigo': ['NSW'],
+  'Mildura': ['NSW', 'SA'],
+  'Portland': ['SA'],
+  'Wagga Wagga': ['VIC'],
+  'Eden': ['VIC'],
+  'Bega': ['VIC'],
+  'Brisbane': ['NSW'],
+  'Gold Coast hinterland': ['NSW'],
+  'Toowoomba': ['NSW'],
+  'Mount Gambier': ['VIC'],
+  'Canberra': ['NSW'],
+  'Cooma / Snowy Mountains': ['VIC'],
+};
+
+/** Pick an agency that covers this region, or a neighbour's if this really is a border town. */
+function pickAgency(list: [string, string][], region: string, anchorName?: string): [string, string] {
   const home = list.filter((a) => {
     const r = AGENCY_REGIONS[a[0]];
     return r === '*' || (Array.isArray(r) && r.includes(region));
   });
+  // Only a genuine border town may borrow the neighbour's service, AND the
+  // neighbour must actually adjoin the region the job is in. A transfer can
+  // start in a different state from its anchor, which is how an anchor whose
+  // neighbours include the ACT lent an ACT crew to a Victorian hospital.
+  const neighbours = (anchorName ? (ANCHOR_BORDERS[anchorName] ?? []) : (REGION_ADJ[region] ?? [])).filter((x) =>
+    (REGION_ADJ[region] ?? []).includes(x),
+  );
   const adj = list.filter((a) => {
     const r = AGENCY_REGIONS[a[0]];
-    return Array.isArray(r) && (REGION_ADJ[region] ?? []).some((x) => r.includes(x));
+    return Array.isArray(r) && neighbours.some((x) => r.includes(x));
   });
   if (home.length && (!adj.length || Math.random() > 0.15)) return rand(home);
   if (adj.length) return rand(adj);
   if (home.length) return rand(home);
   // Nothing in this scenario's list operates here. Prefer a national body over
   // an interstate one — "RFDS" in the Kimberley reads fine, "Ambulance
-  // Victoria" does not.
+  // Victoria" does not. If the list has no national body either, invent a
+  // neutral one rather than returning a state brand that cannot be there:
+  // falling back to rand(list) is what put NSW Ambulance on a WA boat ramp.
   const national = list.filter((a) => AGENCY_REGIONS[a[0]] === '*');
-  return rand(national.length ? national : list);
+  if (national.length) return rand(national);
+  const unbranded = list.filter((a) => !AGENCY_REGIONS[a[0]]);
+  if (unbranded.length) return rand(unbranded);
+  return ['State Rescue Helicopter', 'Rescue'];
 }
 
 // ---- composition fragments -----------------------------------------
@@ -553,7 +683,6 @@ const CALLSIGN_BANK: Record<string, string[]> = {
   'National Aerial Firefighting': ['Bomber 391', 'Bomber 737', 'Bomber 910', 'Birddog 1'],
   'AMSA / JRCC Australia': ['Rescue 465', 'Rescue 466', 'Rescue 001'],
   'Australian Border Force': ['Border 610', 'Border 620'],
-  'National Parks / DBCA': ['Ranger 1', 'Ranger 4'],
 };
 function callsignFor(agency: string, cs: string): string {
   const bank = CALLSIGN_BANK[agency];
@@ -658,7 +787,7 @@ const TEMPLATES: Tpl[] = [
   {
     kind: 'MVA with Entrapment',
     toDefinitiveCare: true,
-    feature: 'road',
+    feature: 'majorroad',
     category: 'HEMS / trauma',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -727,7 +856,9 @@ const TEMPLATES: Tpl[] = [
     toDefinitiveCare: true,
     category: 'Rescue / winch',
     cls: 'rotary',
-    agencies: [['Westpac Life Saver Rescue', 'Lifesaver'], ['NSW Ambulance', 'Rescue'], ['RACQ LifeFlight Rescue', 'Rescue'], ['Ambulance Victoria', 'HEMS']],
+    // HEMS_AGENCIES covers all eight jurisdictions; the old hand-picked list
+    // was NSW/QLD/VIC only, so a WA flood drew a Queensland crew.
+    agencies: HEMS_AGENCIES,
     weight: 2,
     p1: 0.85,
     p2: 0.15,
@@ -790,7 +921,7 @@ const TEMPLATES: Tpl[] = [
   {
     kind: 'Bus / Coach Rollover — Multi-Casualty',
     toDefinitiveCare: true,
-    feature: 'road',
+    feature: 'majorroad',
     category: 'HEMS / trauma',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -830,7 +961,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Missing Person — Bushland Search',
     category: 'Police aviation',
     cls: 'rotary',
-    agencies: [...POLICE_AGENCIES, ['National Parks / DBCA', 'Ranger'], ['AMSA / JRCC Australia', 'Rescue']],
+    agencies: [...POLICE_AGENCIES, ...PARKS_AGENCIES, ['AMSA / JRCC Australia', 'Rescue']],
     p1: 0.4,
     p2: 0.45,
     anchorKinds: ['regional', 'remote'],
@@ -873,7 +1004,7 @@ const TEMPLATES: Tpl[] = [
     toDefinitiveCare: true,
     category: 'Aeromedical',
     cls: 'rotary',
-    agencies: [['RACQ LifeFlight Rescue', 'Rescue'], ['Westpac Life Saver Rescue', 'Lifesaver'], ['NSW Ambulance', 'Rescue']],
+    agencies: HEMS_AGENCIES,
     p1: 0.6,
     p2: 0.35,
     transport: true,
@@ -913,7 +1044,7 @@ const TEMPLATES: Tpl[] = [
   {
     kind: 'Powerline Strike / Electrocution',
     toDefinitiveCare: true,
-    feature: 'road',
+    feature: 'majorroad',
     category: 'HEMS / trauma',
     cls: 'rotary',
     agencies: HEMS_AGENCIES,
@@ -936,7 +1067,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Fire Reconnaissance / Crew Insertion',
     category: 'Firefighting support',
     cls: 'rotary',
-    agencies: [...FIRE_AGENCIES, ['National Parks / DBCA', 'Ranger']],
+    agencies: [...FIRE_AGENCIES, ...PARKS_AGENCIES],
     weight: 2,
     p1: 0.3,
     p2: 0.5,
@@ -955,7 +1086,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Storm Damage — SES Air Support',
     category: 'Firefighting support',
     cls: 'rotary',
-    agencies: [...POLICE_AGENCIES, ...FIRE_AGENCIES, ['National Parks / DBCA', 'Ranger']],
+    agencies: [...POLICE_AGENCIES, ...FIRE_AGENCIES, ...PARKS_AGENCIES],
     p1: 0.15,
     p2: 0.45,
     anchorKinds: ['regional', 'coastal'],
@@ -1175,7 +1306,7 @@ const TEMPLATES: Tpl[] = [
     kind: 'Aerial Survey / Photography',
     category: 'Survey',
     cls: 'fixed',
-    agencies: [['Aerial Survey Operations', 'Survey'], ['National Parks / DBCA', 'Ranger']],
+    agencies: [['Aerial Survey Operations', 'Survey'], ...PARKS_AGENCIES],
     p1: 0.02,
     p2: 0.18,
     anchorKinds: ['regional', 'remote', 'coastal'],
@@ -1286,12 +1417,30 @@ function buildJob(
   }
   const anchor = rand(pool.length ? pool : ANCHORS);
 
-  const spot = (tpl.feature && placeOnFeature(anchor, tpl.feature)) || placePoint(anchor, tpl.terrain);
+  // Choose WHERE the job is by choosing WHAT it is on. Prefer settings this
+  // anchor actually has a real feature for, so "a residential area near Sale"
+  // lands among houses instead of on a random bearing in a paddock. If none of
+  // the template's settings map to anything nearby, fall back to the old coarse
+  // placement rather than dropping the job.
+  const settingChoices = tpl.settings.length ? tpl.settings : [];
+  const placeable = settingChoices.filter((s) => {
+    const k = featureForSetting(s);
+    return k ? anchorHasFeature(anchor.name, k) : false;
+  });
+  const setting = placeable.length ? rand(placeable) : settingChoices.length ? rand(settingChoices) : anchor.name;
+  // Only a real template setting picks the feature. Offshore and airstrip jobs
+  // are positioned by their own rules, and when a template has no settings the
+  // fallback is the TOWN name — which would match this table on a town called
+  // Airlie Beach and put a "Search and Rescue — Offshore" job on the sand.
+  const settingKind =
+    settingChoices.length && tpl.terrain !== 'offshore' && tpl.terrain !== 'airstrip' ? featureForSetting(setting) : null;
+
+  const spot =
+    (settingKind && placeOnFeature(anchor, settingKind)) ||
+    (tpl.feature && placeOnFeature(anchor, tpl.feature)) ||
+    placePoint(anchor, tpl.terrain);
   let lat = spot.lat;
   let lon = spot.lon;
-  const [agencyName] = pickAgency(tpl.agencies, anchor.region);
-  const csTmpl = tpl.agencies.find((a) => a[0] === agencyName)?.[1] ?? 'Rescue';
-  const callsign = callsignFor(agencyName, csTmpl);
   // Airstrip jobs name a REAL aerodrome — "Newcastle Airport (YWLM)" rather than
   // "the town aerodrome at Newcastle" — and the job sits on that field, not on a
   // random bearing from the town.
@@ -1313,11 +1462,17 @@ function buildJob(
       })
     : aeroPool;
   const aero = aeroOk.length ? rand(aeroOk) : null;
+
+  // Agency is chosen for the region the job is really in: a transfer begins at
+  // the referring hospital, which can be across a border from the anchor.
+  const jobRegion = from?.region ?? anchor.region;
+  const [agencyName] = pickAgency(tpl.agencies, jobRegion, anchor.name);
+  const csTmpl = tpl.agencies.find((a) => a[0] === agencyName)?.[1] ?? 'Rescue';
+  const callsign = callsignFor(agencyName, csTmpl);
   if (aero) {
     lat = aero.lat;
     lon = aero.lon;
   }
-  const setting = tpl.settings.length ? rand(tpl.settings) : anchor.name;
   const loc = from
     ? from.name
     : aero
@@ -1353,26 +1508,34 @@ function buildJob(
     candidateHospital && farEnough && (tpl.alwaysTransports || chance(0.92)) ? candidateHospital : undefined;
   const patient = tpl.cas ? makeCasualty(tpl.cas) : undefined;
 
+  // Pick the LZ first: the briefing has to agree with it.
+  const lz = rand(tpl.lz);
+  // "Recovery to base" / "N/A" means the aircraft never touches down at the
+  // scene, so a note about marking the LZ there is nonsense — it put "Landing
+  // area is a closed section of road between two appliances" into an aerial
+  // survey whose own LZ line said "Recovery to the survey base".
+  const landsOnScene = !/^(recovery\b|n\/a\b)/i.test(lz) && tpl.terrain !== 'offshore' && tpl.terrain !== 'airstrip';
+
   // Compose the briefing: template lead + patient + a complication + access + weather note.
   const compPool = [...(tpl.complications ?? []), ...COMPLICATIONS];
   const parts = [
     tpl.detail({ loc, town: anchor.name, region: anchor.region, hospital: transportTo?.name, night: day.night }),
     patient ? `Patient: ${patient}` : '',
     chance(0.7) ? rand(compPool) : '',
-    tpl.terrain === 'offshore' || tpl.terrain === 'airstrip' ? '' : chance(0.7) ? rand(ACCESS_NOTES) : '',
+    landsOnScene && chance(0.7) ? rand(ACCESS_NOTES) : '',
     w.note,
   ].filter(Boolean);
 
   const eta = priority === 'P1' ? `Priority 1 — go now. Estimate ${rint(35, 75)} min on task.` : priority === 'P2' ? `Priority 2 — respond without delay. ~${rint(60, 110)} min on task.` : `Priority 3 — as tasking allows.`;
 
-  const support = [
-    'Road ambulance on scene',
-    'Police en route',
-    'Fire service on scene',
-    'Local rescue unit responding',
-    'SES road crew tasked',
-    'Duty clinician on the line',
-  ];
+  // Who else is at the scene. A ground response only makes sense where there IS
+  // a scene with people at it — a road ambulance has no business being listed
+  // on an aerial survey of a catchment or an offshore surveillance patrol.
+  const support = tpl.cas
+    ? ['Road ambulance on scene', 'Police en route', 'Fire service on scene', 'Local rescue unit responding', 'SES road crew tasked', 'Duty clinician on the line']
+    : landsOnScene
+      ? ['Police en route', 'Fire service on scene', 'Local rescue unit responding', 'SES road crew tasked', 'Ground party at the LZ']
+      : ['Duty operations manager on the line', 'Sensor/mission specialist aboard', 'Coordination centre monitoring', 'Ground agency liaison on the radio'];
 
   return {
     id: randomUUID(),
@@ -1406,7 +1569,7 @@ function buildJob(
     hazards: rand(tpl.hazards),
     persons: rand(tpl.persons),
     access: rand(tpl.access),
-    lz: rand(tpl.lz),
+    lz,
     units: [`${callsign} (tasked)`, ...support.sort(() => Math.random() - 0.5).slice(0, rint(1, 3))],
     weather: w.text,
     transportTo,
