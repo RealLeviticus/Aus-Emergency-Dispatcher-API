@@ -81,13 +81,35 @@ du -sh /opt/aed-dispatcher/updates                                     # ~80 MB 
 Nothing prunes old releases; delete stale `.exe`s by hand, but never the one named by the
 current `latest.yml`.
 
-## Pull-based auto-deploy (optional)
+## Pull-based auto-deploy
+
+Installed and running since 2026-09-12: the timer checks `origin/main` every two minutes and
+redeploys only when it has moved.
 
 ```bash
-chmod +x deploy/deploy.sh
-sudo cp deploy/aed-dispatcher-deploy.service deploy/aed-dispatcher-deploy.timer /etc/systemd/system/
+sudo install -m 644 deploy/aed-dispatcher-deploy.service /etc/systemd/system/
+sudo install -m 644 deploy/aed-dispatcher-deploy.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now aed-dispatcher-deploy.timer
+
+# The service runs as root, but the clone is owned by the login user. git refuses to
+# touch a repo owned by someone else, so without this every timed run dies with
+# "detected dubious ownership" and exit 128 — while the same script run by hand under
+# sudo works fine, because sudo leaves HOME pointing at the owning user's gitconfig.
+sudo git config --system --add safe.directory /opt/aed-dispatcher
+```
+
+Do not `chmod +x deploy/deploy.sh` on the server: the mode is committed (100755), and
+`deploy.sh` git-resets the worktree, so a local-only chmod is undone by the first
+successful deploy and the next run breaks again.
+
+Check it works — the run should end `deploy ok: <sha>`, or exit silently when there is
+nothing new:
+
+```bash
+sudo systemctl start aed-dispatcher-deploy.service
+systemctl show aed-dispatcher-deploy.service -p Result -p ExecMainStatus
+systemctl list-timers aed-dispatcher-deploy.timer
 ```
 
 ## Operating
