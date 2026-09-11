@@ -45,6 +45,26 @@ unless the same `clientId` reconnects first.
 Read-only REST: `GET /api/v1/sessions/:sessionId/objects` (snapshot, for a map overlay or
 the website), `GET /health`.
 
+## RAAFv fleet
+
+RAAFv's crew centre runs phpVMS v7, which tracks a current location for every airframe.
+Tasking reads it so a job names an aeroplane that is really there:
+
+| Crew centre endpoint | Auth | Used for |
+| --- | --- | --- |
+| `GET /api/airports/hubs` | public | the bases RAAFv actually operates from |
+| `GET /api/acars` | public | who is airborne right now — those airframes are not offered |
+| `GET /api/fleet` | `PHPVMS_API_KEY` | every airframe, its type, its hub, and the airport it is parked at |
+
+We expose the merged view as `GET /fleet` (aircraft grouped by the base they are at) and
+`POST /fleet/user` `{apiKey}` (the aircraft one member is cleared to fly, using their own
+key, which is never stored). The desktop app reads both — View ▸ RAAFv fleet.
+
+Without `PHPVMS_API_KEY` everything still works: the generator falls back to RAAFv's
+published order of battle (`src/fleet.ts`), so squadrons and bases stay correct and only
+the individual tail number is missing. Job generation never blocks on, or fails because
+of, the crew centre being slow or down.
+
 ## Next
 
 - Electron client: a `SyncClient` in the app's main process that bridges `SimBridge`

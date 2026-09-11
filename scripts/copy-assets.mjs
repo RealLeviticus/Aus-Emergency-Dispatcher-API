@@ -7,12 +7,13 @@
 import { copyFileSync, existsSync, mkdirSync } from 'fs';
 import path from 'path';
 
-const ASSETS = ['features.json', 'aerodromes.json', 'hospitals.json', 'hospital-airports.json'];
+const ASSETS = ['features.json', 'roads.json', 'aerodromes.json', 'hospitals.json', 'hospital-airports.json'];
 mkdirSync('dist', { recursive: true });
 for (const f of ASSETS) {
   const from = path.join('src', f);
   if (!existsSync(from)) {
-    console.warn(`[copy-assets] ${from} missing — run "npm run prebake:features"`);
+    const how = f === 'roads.json' ? 'prebake:roads' : 'prebake:features';
+    console.warn(`[copy-assets] ${from} missing — run "npm run ${how}"`);
     continue;
   }
   copyFileSync(from, path.join('dist', f));

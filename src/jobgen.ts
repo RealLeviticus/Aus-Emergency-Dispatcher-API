@@ -1,5 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { hasRoadGraph, pursuitRoute, syntheticRoute, type FleeProfile } from './roads.js';
+import {
+  availabilityAt,
+  HOME_BASES,
+  launchableBases,
+  RAAFV_BASES,
+  rosterRoles,
+  unitForAircraft,
+  unitsFor,
+  type Base as FleetBase,
+  type Role,
+} from './fleet.js';
 
 /**
  * Server-side tasking generator. Jobs are placed at real Australian locations so
@@ -38,6 +50,34 @@ export type AirTarget = {
   /** transponder code, for the brief */
   squawk?: string;
   route: { lat: number; lon: number; altFt: number; speedKt: number }[];
+};
+
+/**
+ * A GROUND (or surface) vehicle the job wants spawned and driven — the car in a
+ * police pursuit, a convoy being monitored, a vessel of interest. Unlike an
+ * AirTarget these follow real roads: the route comes from the pre-baked OSM
+ * road graph (see roads.ts), so the vehicle takes actual intersections.
+ */
+export type GroundTarget = {
+  label: string;
+  /** picks the title group the client spawns */
+  vehicle: 'car' | 'bike' | 'truck' | 'boat';
+  /**
+   * `flee` runs hard and bails out at the end of the route — the crew watches
+   * it stop and the offenders decamp. `cruise` just drives, unaware it is
+   * being followed, which is the covert / monitoring tasking.
+   */
+  behaviour: 'flee' | 'cruise';
+  /** holds at route[0] until the aircraft is within this range, so it cannot
+   *  finish the run before you get airborne */
+  holdUntilNm?: number;
+  /** spawn this many in trail — a convoy, or a group of bikes */
+  convoy?: number;
+  /** registration / description, for the brief */
+  rego?: string;
+  /** the roads it runs along, in order — for the brief and the commentary */
+  roads?: string[];
+  route: { lat: number; lon: number; speedKt: number }[];
 };
 
 export type Job = {
@@ -85,6 +125,23 @@ export type Job = {
   channel: Channel;
   /** RAAFv only: the AI aircraft to intercept / shadow / join on (may be a formation) */
   targets?: AirTarget[];
+  /**
+   * RAAFv only: the airframe the tasking is written for. `registration` is a
+   * real tail number read from the crew centre fleet — present only when the
+   * aircraft is genuinely parked at that base and not already flying.
+   */
+  tasked?: {
+    type: string;
+    squadron: string;
+    registration?: string;
+    /** where the sortie launches from — not necessarily the squadron's home */
+    homeBase: string;
+    /** the squadron is deployed there rather than based there */
+    detachment?: boolean;
+    source: 'crew-centre' | 'roster';
+  };
+  /** vehicles / vessels to spawn and drive — police pursuits and surveillance */
+  groundTargets?: GroundTarget[];
 };
 
 // ---- rng --------------------------------------------------------------
@@ -451,6 +508,8 @@ type DetailCtx = {
   region: string;
   hospital?: string;
   night: boolean;
+  /** the roads a pursuit runs along, already formatted ("the Hume Fwy, then Sydney Rd") */
+  roads?: string;
 };
 
 type Tpl = {
@@ -489,6 +548,24 @@ type Tpl = {
   terrain: Terrain;
   /** setting phrases that agree with `terrain` (empty = use the town name) */
   settings: string[];
+  /**
+   * This job spawns a MOVING ground or surface target for the crew to track —
+   * the car in a pursuit, a convoy, a vessel of interest. The route follows the
+   * real road graph where the anchor has one (see roads.ts).
+   */
+  pursuit?: {
+    vehicle: GroundTarget['vehicle'];
+    behaviour: GroundTarget['behaviour'];
+    /** speed ceiling profile for a road vehicle */
+    profile?: FleeProfile;
+    /** how long the run should last, MINUTES [min, max] — see roads.ts on why
+     *  this is budgeted by time and not by distance */
+    mins?: [number, number];
+    /** more than one vehicle, in trail */
+    convoy?: [number, number];
+    /** what the tracking panel calls it */
+    label: string[];
+  };
   /** clinical one-liner flavour, if this job carries a patient */
   cas?: CasKind;
   /** extra template-specific complication lines mixed into the shared pool */
@@ -541,6 +618,17 @@ const FIRE_AGENCIES: [string, string][] = [
   ['NT Fire and Rescue Service', 'Firebird'],
   ['ACT Rural Fire Service', 'Firebird'],
   ['National Aerial Firefighting', 'Bomber'],
+];
+
+/**
+ * Maritime tasking is a police air wing job, but on the water the Australian
+ * Border Force and Maritime Border Command task it too — a vessel of interest
+ * inbound from offshore is theirs, not a state force's.
+ */
+const MARITIME_AGENCIES: [string, string][] = [
+  ...POLICE_AGENCIES,
+  ['Australian Border Force', 'Border'],
+  ['Maritime Border Command', 'Border'],
 ];
 
 /**
@@ -610,6 +698,7 @@ const AGENCY_REGIONS: Record<string, string[] | '*'> = {
   'AMSA / JRCC Australia': '*',
   'JRCC Australia': '*',
   'Australian Border Force': '*',
+  'Maritime Border Command': '*',
   'Marine Rescue': '*',
   'NSW National Parks and Wildlife Service': ['NSW'],
   'Parks Victoria': ['VIC'],
@@ -701,6 +790,16 @@ const CALLSIGN_BANK: Record<string, string[]> = {
   'National Aerial Firefighting': ['Bomber 391', 'Bomber 737', 'Bomber 910', 'Birddog 1'],
   'AMSA / JRCC Australia': ['Rescue 465', 'Rescue 466', 'Rescue 001'],
   'Australian Border Force': ['Border 610', 'Border 620'],
+  'Maritime Border Command': ['Border 630', 'Border 640'],
+  // The state air wings all fly as "Polair", numbered per jurisdiction.
+  'NSW Police Force PolAir': ['PolAir 1', 'PolAir 2', 'PolAir 3', 'PolAir 4', 'PolAir 5', 'PolAir 6'],
+  'Victoria Police Air Wing': ['Polair 1', 'Polair 2', 'Polair 3', 'Polair 4', 'Polair 5'],
+  'Queensland Police Service Polair': ['Polair 1', 'Polair 2', 'Polair 3', 'Polair 4', 'Polair 5'],
+  'Western Australia Police Force Air Wing': ['Polair 61', 'Polair 62', 'Polair 63'],
+  'SA Police PolAir': ['PolAir 1', 'PolAir 2'],
+  'Tasmania Police Air Wing': ['PolAir 1', 'PolAir 2'],
+  'NT Police Air Wing': ['PolAir 1', 'PolAir 2'],
+  'ACT Policing (AFP)': ['PolAir 1', 'PolAir 2'],
 };
 function callsignFor(agency: string, cs: string): string {
   const bank = CALLSIGN_BANK[agency];
@@ -800,6 +899,44 @@ const ACCESS_NOTES = [
   'Sports oval adjacent, floodlit, powerlines along the western boundary.',
   'No prepared LZ — assess a winch or a one-skid on arrival.',
 ];
+
+/** "the Hume Freeway, then onto Sydney Road" — reads the road names into a brief. */
+function formatRoads(roads: string[]): string {
+  const r = roads.filter(Boolean).slice(0, 3);
+  if (!r.length) return '';
+  if (r.length === 1) return r[0]!;
+  return `${r.slice(0, -1).join(', ')}, then ${r[r.length - 1]}`;
+}
+
+/**
+ * A plausible registration for the jurisdiction. Every state runs its own
+ * format, and "ABC 123" on a Victorian pursuit is the kind of detail that
+ * reads wrong to anyone who lives here.
+ */
+function plate(region: string): string {
+  const L = () => 'ABCDEFGHJKLMNPRSTUVWXYZ'[rint(0, 22)]!;
+  const D = () => String(rint(0, 9));
+  switch (region) {
+    case 'VIC':
+      return `${D()}${L()}${L()}·${D()}${L()}${L()}`;
+    case 'NSW':
+      return `${L()}${L()} ${D()}${D()} ${L()}${L()}`;
+    case 'QLD':
+      return `${D()}${D()}${D()} ${L()}${L()}${L()}`;
+    case 'WA':
+      return `${D()}${L()}${L()}${L()} ${D()}${D()}${D()}`;
+    case 'SA':
+      return `S${D()}${D()}${D()} ${L()}${L()}${L()}`;
+    case 'TAS':
+      return `${L()}${D()}${D()} ${L()}${L()}`;
+    case 'NT':
+      return `CA ${D()}${D()} ${L()}${L()}`;
+    case 'ACT':
+      return `Y${L()}${L()} ${D()}${D()}${L()}`;
+    default:
+      return `${L()}${L()}${L()} ${D()}${D()}${D()}`;
+  }
+}
 
 const TEMPLATES: Tpl[] = [
   {
@@ -992,6 +1129,558 @@ const TEMPLATES: Tpl[] = [
     persons: ['1 misper; ~30 ground searchers in the area'],
     access: ['N/A — search sectors'],
     lz: ['Staging area at the search base / trailhead'],
+  },
+  // ---- police aviation ------------------------------------------------
+  // The air wing's bread and butter. A pursuit, a shadow and a convoy job all
+  // spawn a vehicle that actually drives the road network (see roads.ts); the
+  // rest are the overwatch and search tasking that fills the rest of a shift.
+  {
+    kind: 'Vehicle Pursuit — Airborne Tracking',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    weight: 3,
+    p1: 0.8,
+    p2: 0.18,
+    anchorKinds: ['metro', 'regional'],
+    terrain: 'road',
+    feature: 'majorroad',
+    settings: ['an arterial road', 'a highway', 'the suburban street network', 'a freeway', 'an industrial estate'],
+    pursuit: {
+      vehicle: 'car',
+      behaviour: 'flee',
+      profile: 'car',
+      mins: [5, 10],
+      label: [
+        'Stolen sedan — 3 POB',
+        'Vehicle of interest — failed to stop',
+        'Stolen hatch — driver only',
+        'Pursuit vehicle — 2 POB, both masked',
+        'Stolen dual-cab — 4 POB',
+      ],
+    },
+    brief: [
+      'Vehicle failed to stop, ground pursuit running.',
+      'Stolen vehicle running from a breath test site.',
+      'Armed robbery offenders decamping by car.',
+      'Pursuit terminated by ground units — air wing to retain the eye.',
+    ],
+    detail: (c) =>
+      `Ground units are pursuing a vehicle near ${c.loc}.${c.roads ? ` Running ${c.roads}.` : ''} ` +
+      `Take the EYE so the road units can back off — call the running commentary, street names and direction of travel, ` +
+      `and keep the cordon and the dog unit ahead of it. Stay with it until it stops or is abandoned.`,
+    complications: [
+      'Ground units have been told to withdraw — the eye is yours alone.',
+      'The vehicle is driving on the wrong side; do not encourage the speed.',
+      'Stop sticks are being deployed ahead — call the vehicle onto them.',
+    ],
+    hazards: ['Powerlines and towers over the arterial, other aircraft', 'Built-up area, noise abatement, low light'],
+    persons: ['2–4 offenders in the vehicle; no injuries reported yet'],
+    access: ['N/A — airborne task'],
+    lz: ['Recovery to base once the vehicle is stopped and offenders are in custody'],
+  },
+  {
+    kind: 'Stolen Vehicle — Covert Shadow',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    weight: 2,
+    p1: 0.25,
+    p2: 0.55,
+    anchorKinds: ['metro', 'regional'],
+    terrain: 'road',
+    feature: 'majorroad',
+    settings: ['an arterial road', 'a shopping centre car park', 'a residential area', 'an industrial estate'],
+    pursuit: {
+      vehicle: 'car',
+      behaviour: 'cruise',
+      profile: 'car',
+      mins: [8, 14],
+      label: [
+        'ANPR hit — stolen sedan',
+        'Vehicle of interest — target of a warrant',
+        'Suspect vehicle — no pursuit authorised',
+        'Stolen wagon — linked to a series',
+      ],
+    },
+    brief: [
+      'ANPR hit on a stolen vehicle — shadow only, no pursuit.',
+      'Target vehicle under surveillance, ground crews need an eye.',
+      'Suspect vehicle linked to a burglary series — follow it home.',
+    ],
+    detail: (c) =>
+      `Plain-clothes crews are following a vehicle of interest near ${c.loc}.${c.roads ? ` Its route runs ${c.roads}.` : ''} ` +
+      `Stay HIGH and wide — the occupants must not know you are there. No pursuit is authorised. ` +
+      `Call the route so the ground crews can leapfrog, and hold the eye until it stops at an address.`,
+    complications: [
+      'The occupants are counter-surveillance conscious — vary your position.',
+      'Surveillance crews have lost it twice already; do not lose it a third time.',
+      'Do not overfly it directly — keep the offset.',
+    ],
+    hazards: ['Controlled airspace, keep the clearance', 'Built-up area, noise complaints if you sit low'],
+    persons: ['2 occupants; both known to police'],
+    access: ['N/A — airborne task'],
+    lz: ['Recovery to base'],
+  },
+  {
+    kind: 'Siege / Critical Incident Overwatch',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.65,
+    p2: 0.3,
+    anchorKinds: ['metro', 'regional'],
+    terrain: 'urban',
+    settings: ['a residential area', 'a suburban street', 'the town centre', 'an industrial estate'],
+    brief: [
+      'Armed offender barricaded in a house.',
+      'Siege declared, exclusion zone in place.',
+      'Critical incident — offender armed with a firearm.',
+    ],
+    detail: (c) =>
+      `A critical incident is running at ${c.loc}. An exclusion zone is in force and the forward command post is established. ` +
+      `Hold an orbit OUTSIDE the zone and provide overwatch of the rear yards and escape routes — the ground commander cannot see them. ` +
+      `Downlink to the command post if fitted, and report any movement immediately.`,
+    complications: [
+      'Media helicopters are in the area — deconflict on the incident frequency.',
+      'The negotiator is on the line; keep noise off the address.',
+      'The exclusion zone has just been widened — reposition.',
+    ],
+    hazards: ['Offender is armed — stay high and out of line of sight', 'Media aircraft, powerlines, built-up area'],
+    persons: ['1 armed offender; unknown number of persons inside'],
+    access: ['N/A — airborne task'],
+    lz: ['Recovery to base or the forward staging area'],
+  },
+  {
+    kind: 'Tactical Insertion — Police Specialist Group',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.5,
+    p2: 0.4,
+    anchorKinds: ['metro', 'regional', 'remote'],
+    terrain: 'rural',
+    settings: ['a rural property', 'a homestead', 'a bushland block', 'a shed complex', 'a remote holding'],
+    brief: [
+      'Insert a tactical team for a high-risk warrant.',
+      'Specialist group to be placed on a rural property at first light.',
+      'Rope insertion for a high-risk arrest.',
+    ],
+    detail: (c) =>
+      `The specialist response group requires insertion near ${c.loc} for a high-risk entry. ` +
+      `Approach from the far side of the ridge and stay masked until the call — surprise is the plan. ` +
+      `Set down or rope the team at the marked point, lift immediately, then hold overwatch clear of the property.`,
+    complications: [
+      'Dogs on the property will announce you — the run-in has to be quick.',
+      'The entry has been delayed; hold at the holding point until called.',
+      'Team wants a second lift for the exhibits once the scene is safe.',
+    ],
+    hazards: ['Unknown firearms on the property, dogs', 'Wires between the sheds, stock in the paddock, dust on landing'],
+    persons: ['Tactical team of 6 + equipment'],
+    access: ['N/A — insertion; ground units hold at the perimeter'],
+    lz: ['Paddock short of the homestead, marked by the team'],
+  },
+  {
+    kind: 'Traffic Operations — Aerial Enforcement',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.05,
+    p2: 0.35,
+    anchorKinds: ['metro', 'regional'],
+    terrain: 'road',
+    feature: 'majorroad',
+    settings: ['a highway', 'a freeway', 'an arterial road', 'a notorious stretch of rural highway'],
+    brief: [
+      'Aerial speed and behaviour enforcement over the holiday operation.',
+      'Highway operation — air support for the road policing units.',
+      'Hoon operation over the arterial network.',
+    ],
+    detail: (c) =>
+      `Road policing is running an operation over ${c.loc}. Track vehicles between the marked points, time them, ` +
+      `and call offenders onto the intercept crews waiting downstream. Expect a long, boring orbit — and one genuine runner.`,
+    complications: [
+      'One vehicle has just taken off from the intercept point — take the eye.',
+      'The intercept crew has gone to another job; hold the observation.',
+    ],
+    hazards: ['Long orbit — watch the fuel and the fatigue', 'Other traffic in the lane, towers on the ridge'],
+    persons: ['N/A — observation and coordination'],
+    access: ['N/A — airborne task'],
+    lz: ['Recovery to base'],
+  },
+  {
+    kind: 'Public Order — Crowd and Protest Monitoring',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.15,
+    p2: 0.5,
+    anchorKinds: ['metro'],
+    terrain: 'urban',
+    settings: ['the town centre', 'a residential area', 'an industrial estate', 'a parkland reserve'],
+    brief: [
+      'Large protest march moving through the CBD.',
+      'Crowd monitoring for a planned demonstration.',
+      'Two opposing groups converging on the same square.',
+    ],
+    detail: (c) =>
+      `Public order command requests an aerial picture over ${c.loc}. Report crowd size, direction of movement and ` +
+      `where the front of the march actually is — the ground commander is working blind between the buildings. ` +
+      `Stay high enough that you are not the story.`,
+    complications: [
+      'A splinter group has broken away down a side street — follow it.',
+      'Media aircraft on scene; deconflict and keep your separation.',
+      'Command wants a crowd estimate for the next situation report.',
+    ],
+    hazards: ['CBD airspace, tall buildings, media aircraft', 'Noise — stay high, you are being filmed'],
+    persons: ['N/A — crowd estimated in the thousands'],
+    access: ['N/A — airborne task'],
+    lz: ['Recovery to base'],
+  },
+  {
+    kind: 'Major Event Overwatch',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.05,
+    p2: 0.4,
+    anchorKinds: ['metro', 'regional'],
+    terrain: 'urban',
+    settings: ['the town centre', 'a parkland reserve', 'a showground', 'a sports precinct'],
+    brief: [
+      'Air support for a major sporting event.',
+      'Overwatch for a race meeting and the traffic around it.',
+      'Event overwatch — crowd egress after the main event.',
+    ],
+    detail: (c) =>
+      `Event command requests overwatch of ${c.loc}. Monitor the crowd, the car parks and the arterial egress, ` +
+      `and give command early warning of any crush or blockage. A designated orbit and altitude will be allocated on arrival.`,
+    complications: [
+      'A fight has broken out in the eastern car park — get the eye on it.',
+      'Egress has jammed on the main road; command wants options.',
+      'A drone has been reported over the crowd — look for the operator.',
+    ],
+    hazards: ['Temporary restricted airspace over the venue, other aircraft', 'Drones around the crowd, fireworks after the event'],
+    persons: ['N/A — crowd of tens of thousands'],
+    access: ['N/A — airborne task'],
+    lz: ['Recovery to base'],
+  },
+  {
+    kind: 'Dignitary Route Overwatch',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: [...POLICE_AGENCIES, ['ACT Policing (AFP)', 'PolAir']],
+    p1: 0.35,
+    p2: 0.5,
+    anchorKinds: ['metro'],
+    terrain: 'road',
+    feature: 'majorroad',
+    settings: ['an arterial road', 'the town centre', 'a freeway'],
+    brief: [
+      'Motorcade route overwatch for a visiting dignitary.',
+      'Protective operation — air support for the route.',
+      'Route reconnaissance ahead of a protected person movement.',
+    ],
+    detail: (c) =>
+      `A protected person is moving by road through ${c.loc}. Fly the route ahead of the motorcade, ` +
+      `report blockages, stopped vehicles on the overpasses and anything on the route that should not be there. ` +
+      `Stay ahead of the convoy, not over it.`,
+    complications: [
+      'The route has been changed — the alternate runs through the CBD.',
+      'A vehicle is parked on the overpass ahead; get a look at it.',
+      'The move has been brought forward by twenty minutes.',
+    ],
+    hazards: ['Controlled airspace and CBD towers', 'Other aircraft, media interest in the movement'],
+    persons: ['N/A — protective operation'],
+    access: ['N/A — airborne task'],
+    lz: ['Recovery to base'],
+  },
+  {
+    kind: 'Club Run — Convoy Monitoring',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.2,
+    p2: 0.55,
+    anchorKinds: ['metro', 'regional'],
+    terrain: 'road',
+    feature: 'majorroad',
+    settings: ['a highway', 'an arterial road', 'a rural arterial road'],
+    pursuit: {
+      vehicle: 'bike',
+      behaviour: 'cruise',
+      profile: 'bike',
+      mins: [9, 15],
+      convoy: [4, 9],
+      label: ['Club run — motorcycle convoy', 'Outlaw club run — riders in formation', 'Monitored convoy — motorcycles'],
+    },
+    brief: [
+      'Outlaw motorcycle club run moving between chapters.',
+      'Monitored convoy — intelligence wants the route and the numbers.',
+      'Club run heading for a rival chapter clubhouse.',
+    ],
+    detail: (c) =>
+      `A monitored motorcycle convoy is on the move near ${c.loc}.${c.roads ? ` It is running ${c.roads}.` : ''} ` +
+      `Hold the eye and count the riders, call the route, and warn the intercept crews before it reaches the next town. ` +
+      `Do not spook it — this is intelligence gathering, not an interception.`,
+    complications: [
+      'Riders are splitting into two groups at the next junction — call it.',
+      'Intelligence wants a count and a photograph of the lead group.',
+      'A rival convoy is reported inbound on the same road.',
+    ],
+    hazards: ['Long tasking along a highway corridor, towers on the ridges', 'Other traffic, fuel planning for the distance'],
+    persons: ['N/A — convoy of riders, numbers to be confirmed'],
+    access: ['N/A — airborne task'],
+    lz: ['Recovery to base'],
+  },
+  {
+    kind: 'Rural Crime — Stock Theft Patrol',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.05,
+    p2: 0.35,
+    anchorKinds: ['regional', 'remote'],
+    terrain: 'rural',
+    settings: ['a cattle station', 'a rural property', 'a homestead', 'a network of fire trails', 'a paddock'],
+    brief: [
+      'Stock theft — a truckload of cattle taken overnight.',
+      'Rural crime patrol over properties hit in a series.',
+      'Report of an unfamiliar truck loading stock at night.',
+    ],
+    detail: (c) =>
+      `Rural crime investigators request an aerial patrol over ${c.loc}. Check the back gates, the loading ramps and ` +
+      `the tracks out to the boundary for fresh vehicle movement, and photograph anything worth a ground follow-up. ` +
+      `The property runs to the horizon; the ground units cannot cover it.`,
+    complications: [
+      'A truck has just been spotted on the boundary track — get across to it.',
+      'Fresh tyre marks at the far gate; the owner wants them photographed.',
+    ],
+    hazards: ['Wires between the sheds and across the gullies, stock', 'Remote area, long tasking, marginal fuel'],
+    persons: ['N/A — patrol; property owner on the ground'],
+    access: ['Station track from the highway'],
+    lz: ['Paddock near the homestead, owner to mark'],
+  },
+  {
+    kind: 'Trail Bikes — Reserve Patrol',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: [...POLICE_AGENCIES, ...PARKS_AGENCIES],
+    p1: 0.1,
+    p2: 0.45,
+    anchorKinds: ['regional', 'metro'],
+    terrain: 'bush',
+    settings: ['a bushland reserve', 'a state forest', 'a network of fire trails', 'a parkland reserve'],
+    pursuit: {
+      vehicle: 'bike',
+      behaviour: 'flee',
+      profile: 'bike',
+      mins: [5, 9],
+      convoy: [2, 4],
+      label: ['Unregistered trail bikes — riders decamping', 'Trail bikes — failed to stop', 'Illegal riders in the reserve'],
+    },
+    brief: [
+      'Unregistered trail bikes tearing up a reserve.',
+      'Riders failed to stop for a ranger and took to the trails.',
+      'Repeat offenders back in the reserve after a closure.',
+    ],
+    detail: (c) =>
+      `Riders on unregistered bikes are in the reserve near ${c.loc}.${c.roads ? ` They have come out onto ${c.roads}.` : ''} ` +
+      `Ground units cannot follow them on the trails. Hold the eye, call which trail they take, and put the units on the ` +
+      `exit they are heading for — they will be caught at the gate, not in the bush.`,
+    complications: [
+      'The riders have split up at the trail junction — stay with the lead bike.',
+      'One rider has come off; check whether an ambulance is needed.',
+    ],
+    hazards: ['Rising terrain, wires across the valleys, dust', 'Dense canopy — you will lose them under the trees'],
+    persons: ['2–4 riders; no injuries reported'],
+    access: ['N/A — airborne task; ground units at the reserve gates'],
+    lz: ['Trailhead car park or the reserve gate'],
+  },
+  {
+    kind: 'Cannabis Crop — Aerial Detection',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.05,
+    p2: 0.4,
+    anchorKinds: ['regional', 'remote'],
+    terrain: 'bush',
+    settings: ['a state forest', 'a bushland block', 'a network of fire trails', 'scrub near a walking track', 'a forestry block'],
+    brief: [
+      'Aerial detection run over known growing country.',
+      'Informant report of a crop in the state forest.',
+      'Crop eradication — locate the sites for the ground teams.',
+    ],
+    detail: (c) =>
+      `Drug investigators request a detection run over ${c.loc}. Fly the creek lines and the clearings, ` +
+      `look for irrigation line, fresh clearing and vehicle tracks that end nowhere, and mark any site for the ground teams. ` +
+      `Do not overfly a site twice — a second pass tells them you have seen it.`,
+    complications: [
+      'A vehicle has just left a track near the suspected site.',
+      'Ground teams want coordinates for the closest vehicle access.',
+      'A second clearing is visible further up the creek.',
+    ],
+    hazards: ['Rising terrain and wires across the gullies', 'Crop sites are sometimes guarded — do not get low'],
+    persons: ['N/A — detection task; ground teams standing by'],
+    access: ['N/A — search sectors'],
+    lz: ['Staging area at the forest entrance'],
+  },
+  {
+    kind: 'Escapee — Manhunt Containment',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.7,
+    p2: 0.25,
+    anchorKinds: ['regional', 'remote'],
+    terrain: 'rural',
+    settings: ['a rural property', 'a bushland reserve', 'a network of fire trails', 'a paddock', 'a roadhouse'],
+    brief: [
+      'Escapee from a correctional facility, believed on foot.',
+      'Offender absconded from an escort at a country hospital.',
+      'Manhunt — offender ran from a stolen car into scrub.',
+    ],
+    detail: (c) =>
+      `A manhunt is running near ${c.loc}. The cordon is being established but there are too many gaps to hold on the ground. ` +
+      `Work the scrub, the creek lines and the sheds inside the cordon with FLIR if fitted, and put the dog unit onto any find. ` +
+      `The offender is considered dangerous — do not put crew on the ground.`,
+    complications: [
+      'A heat source has been reported in the treeline — confirm it.',
+      'A property owner has reported a shed broken into inside the cordon.',
+      'The cordon is being pulled in; the search area is now much smaller.',
+    ],
+    hazards: ['Offender considered dangerous, possibly armed', 'Rising terrain, wires, fading light on a long tasking'],
+    persons: ['1 escapee; ~40 police on the cordon'],
+    access: ['N/A — airborne task'],
+    lz: ['Staging area at the forward command post'],
+  },
+  {
+    kind: 'Remote Community — Police Response Support',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: POLICE_AGENCIES,
+    p1: 0.45,
+    p2: 0.45,
+    anchorKinds: ['remote'],
+    terrain: 'rural',
+    settings: ['an outstation', 'a remote roadhouse', 'a cattle station', 'a remote holding'],
+    brief: [
+      'Serious assault in a remote community, two officers on the ground.',
+      'Police at a remote community request urgent support.',
+      'Disturbance in a remote community, nearest backup is hours by road.',
+    ],
+    detail: (c) =>
+      `The two-officer station at ${c.loc} has requested support — the nearest backup is hours away by road. ` +
+      `Carry the additional members in, hold overwatch while the situation is stabilised, and be prepared to take a ` +
+      `person out if the road is cut. Coordinate with the community police liaison on arrival.`,
+    complications: [
+      'The airstrip is unserviceable — the oval is the alternative.',
+      'A person has been injured and may need to come out with you.',
+      'The road in is cut; you are the only way in or out today.',
+    ],
+    hazards: ['Remote, long tasking, marginal fuel and no refuelling', 'Dust on landing, stock and dogs on the strip'],
+    persons: ['2 local officers + 4 members to be carried in'],
+    access: ['Community airstrip or the oval'],
+    lz: ['Community airstrip, or the oval with the local officer to mark'],
+  },
+  {
+    kind: 'Vessel of Interest — Maritime Surveillance',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: MARITIME_AGENCIES,
+    weight: 2,
+    p1: 0.4,
+    p2: 0.5,
+    offshore: true,
+    anchorKinds: ['coastal'],
+    terrain: 'offshore',
+    settings: [],
+    pursuit: {
+      vehicle: 'boat',
+      behaviour: 'cruise',
+      mins: [9, 16],
+      label: [
+        'Vessel of interest — inbound, no AIS',
+        'Suspect vessel — met a yacht offshore overnight',
+        'Unidentified vessel — running without lights',
+        'Vessel of interest — rendezvous suspected',
+      ],
+    },
+    brief: [
+      'Unidentified vessel inbound, no AIS, running dark.',
+      'Suspected importation — vessel met another craft offshore.',
+      'Vessel of interest tracking toward an isolated beach.',
+    ],
+    detail: (c) =>
+      `A vessel of interest is tracking off ${c.town}. Water police are launching but are well behind it. ` +
+      `Hold the eye, record its heading and speed, identify the hull and any name or number, and call where it makes landfall. ` +
+      `Stay off it — an obvious overflight and it will dump whatever it is carrying.`,
+    complications: [
+      'The vessel has altered course — it knows something is up.',
+      'A second small craft has come out to meet it.',
+      'Water police want a vector to intercept before it reaches the bar.',
+    ],
+    hazards: ['Overwater, swell and spray, salt on the windscreen', 'Fading light, long way from the coast — watch the fuel'],
+    persons: ['2–4 persons aboard, unknown'],
+    access: ['N/A — overwater task'],
+    lz: ['Recovery to base or the coastal refuelling point'],
+  },
+  {
+    kind: 'Stolen Vessel — Coastal Search',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: [...POLICE_AGENCIES, ['Marine Rescue', 'Marine Rescue']],
+    p1: 0.25,
+    p2: 0.5,
+    anchorKinds: ['coastal'],
+    terrain: 'coast',
+    settings: ['a boat ramp', 'a resort marina', 'a beach access point', 'a dive charter jetty'],
+    brief: [
+      'Vessel stolen from a marina overnight.',
+      'Jet skis taken from a boat ramp, last seen heading north.',
+      'Stolen runabout believed to be running the inshore line.',
+    ],
+    detail: (c) =>
+      `A vessel was taken from ${c.loc} overnight. Water police want the inshore line, the river mouths and the creeks ` +
+      `searched before it is stripped and dumped. Check the moorings and the sand bars — most are found abandoned within a few miles.`,
+    complications: [
+      'A hull matching the description has been reported in a creek mouth.',
+      'The owner is on the radio and can identify the vessel by its canopy.',
+    ],
+    hazards: ['Low-level overwater and over-beach flying, birds', 'Coastal turbulence, glare off the water'],
+    persons: ['N/A — vessel search; offenders may be aboard'],
+    access: ['N/A — search sectors along the coast'],
+    lz: ['Foreshore reserve or the boat ramp car park'],
+  },
+  {
+    kind: 'Illegal Fishing — Aerial Patrol',
+    category: 'Police aviation',
+    cls: 'rotary',
+    agencies: MARITIME_AGENCIES,
+    p1: 0.05,
+    p2: 0.4,
+    offshore: true,
+    anchorKinds: ['coastal'],
+    terrain: 'offshore',
+    settings: [],
+    brief: [
+      'Illegal netting reported inside a marine park.',
+      'Foreign fishing vessel reported inside the zone.',
+      'Compliance patrol over the closed waters.',
+    ],
+    detail: (c) =>
+      `Fisheries compliance requests a patrol over the closed waters off ${c.town}. Photograph any vessel working inside the ` +
+      `boundary, record its name, hull number and gear in the water, and pass the position to the patrol boat. ` +
+      `Your photographs are the evidence — get them right the first time.`,
+    complications: [
+      'A vessel is hauling gear right now — get the photographs before it is aboard.',
+      'The patrol boat is two hours away and wants a track on the vessel.',
+    ],
+    hazards: ['Overwater, well offshore — fuel and flotation', 'Swell, glare, no diversion within range'],
+    persons: ['N/A — compliance patrol'],
+    access: ['N/A — overwater task'],
+    lz: ['Recovery to base'],
   },
   {
     kind: 'Marine Rescue — Winch',
@@ -1500,7 +2189,7 @@ function buildJob(
     lat = aero.lat;
     lon = aero.lon;
   }
-  const loc = from
+  let loc = from
     ? departure
       ? `${from.name} via ${departure.name} (${departure.icao})`
       : from.name
@@ -1511,6 +2200,63 @@ function buildJob(
       : tpl.terrain === 'airstrip'
         ? `${setting} at ${anchor.name}`
         : `${setting} near ${anchor.name}`;
+
+  // A pursuit REPLACES the placement above: the job pin is where the run
+  // starts, and the route is walked over the real road graph so the vehicle
+  // takes actual intersections. An anchor with no harvested roads still runs
+  // the job on a synthetic route rather than dropping the tasking.
+  const groundTargets: GroundTarget[] = [];
+  let pursuitRoads = '';
+  if (tpl.pursuit) {
+    const [lo, hi] = tpl.pursuit.mins ?? [6, 12];
+    const wantMin = lo + Math.random() * (hi - lo);
+    const boat = tpl.pursuit.vehicle === 'boat';
+    // A vessel obviously does not use the road graph. It tracks PARALLEL to the
+    // coast (the anchor's `sea` bearing, turned 90°) with gentle course
+    // changes, so a 12 NM run doesn't put it up a beach.
+    const route =
+      (!boat && hasRoadGraph(anchor.name)
+        ? pursuitRoute(anchor.name, { targetMin: wantMin, profile: tpl.pursuit.profile, near: { lat, lon } })
+        : null) ??
+      syntheticRoute(
+        { lat, lon },
+        boat
+          ? {
+              // a vessel doing ~45 km/h covers about 0.4 NM a minute
+              targetNm: wantMin * 0.4,
+              bearing: ((anchor.sea ?? 90) + (chance(0.5) ? 90 : 270)) % 360,
+              turnMax: 30,
+              speedKmh: [30, 62],
+            }
+          : { targetNm: wantMin * 0.9, profile: tpl.pursuit.profile },
+      );
+    const head = route.points[0]!;
+    lat = head.lat;
+    lon = head.lon;
+    // Name the road the vehicle is actually on. The generic setting phrase was
+    // picked before the route existed, so the brief read "near an arterial road
+    // near Perth" for a run down the Tonkin Highway. The FIRST road goes into
+    // the location, so the running commentary lists only what comes after it —
+    // otherwise the brief named the same highway twice in two sentences.
+    if (route.roads.length) {
+      loc = `the ${route.roads[0]} at ${anchor.name}`;
+      pursuitRoads = formatRoads(route.roads.slice(1));
+    } else {
+      pursuitRoads = formatRoads(route.roads);
+    }
+    const convoy = tpl.pursuit.convoy ? rint(tpl.pursuit.convoy[0], tpl.pursuit.convoy[1]) : undefined;
+    groundTargets.push({
+      label: rand(tpl.pursuit.label),
+      vehicle: tpl.pursuit.vehicle,
+      behaviour: tpl.pursuit.behaviour,
+      // It must not run the whole route before you are airborne and overhead.
+      holdUntilNm: tpl.pursuit.behaviour === 'flee' ? 8 : 12,
+      convoy,
+      rego: tpl.pursuit.vehicle === 'boat' ? undefined : plate(anchor.region),
+      roads: route.roads,
+      route: route.points,
+    });
+  }
 
   const day = daypart();
   const w = wx(day.night);
@@ -1577,7 +2323,14 @@ function buildJob(
   // Compose the briefing: template lead + patient + a complication + access + weather note.
   const compPool = [...(tpl.complications ?? []), ...COMPLICATIONS];
   const parts = [
-    tpl.detail({ loc, town: anchor.name, region: anchor.region, hospital: destinationText, night: day.night }),
+    tpl.detail({
+      loc,
+      town: anchor.name,
+      region: anchor.region,
+      hospital: destinationText,
+      night: day.night,
+      roads: pursuitRoads,
+    }),
     patient ? `Patient: ${patient}` : '',
     chance(0.7) ? rand(compPool) : '',
     landsOnScene && chance(0.7) ? rand(ACCESS_NOTES) : '',
@@ -1586,10 +2339,25 @@ function buildJob(
 
   const eta = priority === 'P1' ? `Priority 1 — go now. Estimate ${rint(35, 75)} min on task.` : priority === 'P2' ? `Priority 2 — respond without delay. ~${rint(60, 110)} min on task.` : `Priority 3 — as tasking allows.`;
 
+  // Police tasking comes down the police net, not the aeromedical one — the
+  // generic pools below would have a pursuit "sourced" from the state health
+  // operations centre with the referring hospital as the informant.
+  const isPolice = tpl.category === 'Police aviation';
+
   // Who else is at the scene. A ground response only makes sense where there IS
   // a scene with people at it — a road ambulance has no business being listed
   // on an aerial survey of a catchment or an offshore surveillance patrol.
-  const support = tpl.cas
+  const support = isPolice
+    ? [
+        'Dog unit responding',
+        'Ground units on the cordon',
+        'Road policing intercept crews staged',
+        'Tactical response group staging',
+        'Local station units attached',
+        'Forward command post established',
+        'Duty inspector on the radio',
+      ]
+    : tpl.cas
     ? ['Road ambulance on scene', 'Police en route', 'Fire service on scene', 'Local rescue unit responding', 'SES road crew tasked', 'Duty clinician on the line']
     : landsOnScene
       ? ['Police en route', 'Fire service on scene', 'Local rescue unit responding', 'SES road crew tasked', 'Ground party at the LZ']
@@ -1622,8 +2390,16 @@ function buildJob(
 
     brief: `${day.label[0]!.toUpperCase()}${day.label.slice(1)}: ${rand(tpl.brief)}`,
     detail: parts.join(' '),
-    source: rand([`${agencyName} operations`, 'State health operations centre', 'Triple Zero (000)', 'State duty operations manager', 'Aeromedical coordination']),
-    informant: rand(['On-scene road crew', 'Duty operations manager', 'Incident controller', 'Reporting person (mobile)', 'Referring hospital', 'Ground search coordinator']),
+    source: rand(
+      isPolice
+        ? [`${agencyName} operations`, 'Police operations centre', 'Police radio (VKC)', 'Duty inspector', 'State intelligence command', 'Triple Zero (000)']
+        : [`${agencyName} operations`, 'State health operations centre', 'Triple Zero (000)', 'State duty operations manager', 'Aeromedical coordination'],
+    ),
+    informant: rand(
+      isPolice
+        ? ['Ground units on scene', 'Duty inspector', 'Police radio (VKC)', 'Surveillance crew', 'Forward commander', 'Local station sergeant']
+        : ['On-scene road crew', 'Duty operations manager', 'Incident controller', 'Reporting person (mobile)', 'Referring hospital', 'Ground search coordinator'],
+    ),
     hazards: rand(tpl.hazards),
     persons: rand(tpl.persons),
     access: rand(tpl.access),
@@ -1634,25 +2410,24 @@ function buildJob(
     patient,
     timeline: eta,
     channel: 'emergency',
+    groundTargets: groundTargets.length ? groundTargets : undefined,
   };
 }
 
 // ---- RAAFv (military) tasking -----------------------------------------
 
-type RaafBase = { name: string; ident: string; lat: number; lon: number; region: string; sea: number };
-
-const RAAF_BASES: RaafBase[] = [
-  { name: 'RAAF Williamtown', ident: 'YWLM', lat: -32.795, lon: 151.834, region: 'NSW', sea: 100 },
-  { name: 'RAAF Richmond', ident: 'YSRI', lat: -33.6, lon: 150.781, region: 'NSW', sea: 95 },
-  { name: 'RAAF Amberley', ident: 'YAMB', lat: -27.64, lon: 152.712, region: 'QLD', sea: 95 },
-  { name: 'RAAF Townsville', ident: 'YBTL', lat: -19.253, lon: 146.765, region: 'QLD', sea: 70 },
-  { name: 'RAAF Tindal', ident: 'YPTN', lat: -14.521, lon: 132.378, region: 'NT', sea: 340 },
-  { name: 'RAAF Darwin', ident: 'YPDN', lat: -12.415, lon: 130.887, region: 'NT', sea: 325 },
-  { name: 'RAAF Pearce', ident: 'YPEA', lat: -31.668, lon: 116.015, region: 'WA', sea: 250 },
-  { name: 'RAAF Learmonth', ident: 'YPLM', lat: -22.236, lon: 114.088, region: 'WA', sea: 280 },
-  { name: 'RAAF East Sale', ident: 'YMES', lat: -38.099, lon: 147.149, region: 'VIC', sea: 190 },
-  { name: 'RAAF Edinburgh', ident: 'YPED', lat: -34.702, lon: 138.621, region: 'SA', sea: 215 },
-];
+/**
+ * Bases, squadrons and airframes come from fleet.ts, which prefers the live
+ * RAAFv crew centre and falls back to RAAFv's published order of battle.
+ *
+ * The old version picked a base and a squadron independently, so the board
+ * regularly showed No. 75 Squadron scrambling out of Pearce (75SQN is at Tindal),
+ * a KC-30A towline flown from Learmonth (a dry base with no aircraft at all) and
+ * a No. 10 Squadron that RAAFv does not have. Tasking now starts from a base,
+ * asks what is actually parked there, and only then chooses a mission those
+ * aircraft can fly.
+ */
+type RaafBase = FleetBase;
 
 const p = (ll: { lat: number; lon: number }, altFt: number, speedKt: number) => ({
   lat: ll.lat,
@@ -1708,16 +2483,13 @@ function airwayRoute(base: RaafBase, brg: number, far: number, alt: number, spd:
 }
 
 /**
- * A task bearing from a RAAF base that mostly points inland.
+ * Which way the area of operations lies from the base.
  *
  * Every build used `Math.random() * 360`, so roughly half of all tasking landed
  * out to sea — an "AO" pinned in the Coral Sea while the brief named a hinterland
  * town. `base.sea` is the bearing toward open water, so the reciprocal is land.
  * A quarter of tasks still go seaward, which is realistic for air defence and
  * maritime work; those get an honest over-water place name (see aoPlaceName).
- */
-/**
- * Which way the area of operations lies from the base.
  *
  * `landOnly` matters for tasking that has to happen on the ground: a drop
  * zone, a JTAC's troops, or an aeromedical evacuation loading litter patients
@@ -1740,7 +2512,7 @@ const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', '
  * as a hinterland job. Beyond 70 NM from any anchor, say it as a bearing and
  * range from the base instead.
  */
-function aoPlaceName(base: RaafBase, lat: number, lon: number): string {
+function aoPlaceName(base: RaafBase, lat: number, lon: number): { label: string; phrase: string } {
   let best = ANCHORS[0]!;
   let d = Infinity;
   for (const a of ANCHORS) {
@@ -1750,25 +2522,15 @@ function aoPlaceName(base: RaafBase, lat: number, lon: number): string {
       best = a;
     }
   }
-  if (d <= 70) return best.name;
+  // 120 NM rather than 70: most Australian tasking is within that of somewhere
+  // with a name, and a named town reads far better than a bearing.
+  if (d <= 120) return { label: best.name, phrase: best.name };
   const brg = (Math.atan2(lon - base.lon, lat - base.lat) * 180) / Math.PI;
   const pt = COMPASS[Math.round(((brg + 360) % 360) / 22.5) % 16];
-  // relative to the base, which the caller already names — "RAAF Amberley AO,
-  // 130 NM E" rather than "... 130 NM E of RAAF Amberley".
-  return `${Math.round(rngNm(base.lat, base.lon, lat, lon))} NM ${pt}`;
-}
-
-function nearestAnchorName(lat: number, lon: number): string {
-  let best = ANCHORS[0]!;
-  let d = Infinity;
-  for (const a of ANCHORS) {
-    const dd = rngNm(lat, lon, a.lat, a.lon);
-    if (dd < d) {
-      d = dd;
-      best = a;
-    }
-  }
-  return best.name;
+  const nm = Math.round(rngNm(base.lat, base.lon, lat, lon));
+  // The label goes in the place column, where the base is already named beside
+  // it; the phrase goes into sentences, where it has to stand on its own.
+  return { label: `${nm} NM ${pt}`, phrase: `a point ${nm} NM ${pt} of ${base.name}` };
 }
 
 const DEFENDED: { name: string; lat: number; lon: number }[] = [
@@ -1783,17 +2545,169 @@ const DEFENDED: { name: string; lat: number; lon: number }[] = [
   { name: 'Darwin', lat: -12.46, lon: 130.84 },
   { name: 'Townsville', lat: -19.26, lon: 146.82 },
 ];
-function nearestDefended(lat: number, lon: number): string {
-  let best = DEFENDED[0]!;
+/**
+ * The state the job is actually in. The region used to be copied from the home
+ * base, so a sustainment run from Fairbairn to Curtin was filed under "ACT"
+ * with a pin in the Kimberley — and the console's sector column, which is what
+ * an operator sorts the board on, said the same wrong thing.
+ */
+function regionAt(lat: number, lon: number, fallback: string): string {
+  let best: Anchor | null = null;
+  let d = Infinity;
+  for (const a of ANCHORS) {
+    const dd = rngNm(lat, lon, a.lat, a.lon);
+    if (dd < d) {
+      d = dd;
+      best = a;
+    }
+  }
+  return best && d <= 400 ? best.region : fallback;
+}
+
+/**
+ * What the base is defending. Measured from the BASE, not from the threat: the
+ * thing being protected is behind you, and a fighter launches to keep a track
+ * away from it.
+ *
+ * `notThis` stops the one sentence that gave the game away — an intercept
+ * brief reading "inbound from the direction of Newcastle toward Newcastle",
+ * which happens whenever the track's datum and the defended city share the
+ * nearest anchor.
+ */
+function nearestDefended(lat: number, lon: number, notThis?: string): string {
+  let best: { name: string; lat: number; lon: number } | null = null;
   let d = Infinity;
   for (const x of DEFENDED) {
+    if (notThis && x.name === notThis) continue;
     const dd = rngNm(lat, lon, x.lat, x.lon);
     if (dd < d) {
       d = dd;
       best = x;
     }
   }
-  return best.name;
+  return (best ?? DEFENDED[0]!).name;
+}
+
+/**
+ * Real Australian Defence training areas and air weapons ranges.
+ *
+ * Ground-attack tasking used to be dropped on a random bearing from the base and
+ * captioned with whatever town was nearest, so a "CAS keyhole" could sit over a
+ * suburb and a live drop could be briefed onto farmland. Australian air-to-ground
+ * work happens in a short, well-known list of places — these — and putting the
+ * job inside one is both safer reading and immediately recognisable to anyone who
+ * flies the area.
+ */
+type Range = { name: string; lat: number; lon: number; kind: 'awr' | 'field' };
+const RANGES: Range[] = [
+  { name: 'Salt Ash Air Weapons Range', lat: -32.75, lon: 151.95, kind: 'awr' },
+  { name: 'Beecroft Weapons Range', lat: -35.05, lon: 150.8, kind: 'awr' },
+  { name: 'Evans Head Air Weapons Range', lat: -29.12, lon: 153.42, kind: 'awr' },
+  { name: 'Singleton Military Area', lat: -32.6, lon: 151.2, kind: 'field' },
+  { name: 'Shoalwater Bay Training Area', lat: -22.4, lon: 150.3, kind: 'field' },
+  { name: 'Townsville Field Training Area', lat: -19.55, lon: 146.6, kind: 'field' },
+  { name: 'Wide Bay Training Area', lat: -25.85, lon: 152.4, kind: 'field' },
+  { name: 'Delamere Air Weapons Range', lat: -15.77, lon: 131.72, kind: 'awr' },
+  { name: 'Bradshaw Field Training Area', lat: -15.3, lon: 130.7, kind: 'field' },
+  { name: 'Mount Bundey Training Area', lat: -12.9, lon: 131.65, kind: 'field' },
+  { name: 'Cultana Training Area', lat: -32.8, lon: 137.35, kind: 'field' },
+  { name: 'the Woomera Range Complex', lat: -30.95, lon: 136.5, kind: 'awr' },
+  { name: 'Puckapunyal Military Area', lat: -36.95, lon: 145.05, kind: 'field' },
+  { name: 'Lancelin Training Area', lat: -31.05, lon: 115.35, kind: 'awr' },
+  { name: 'Yampi Sound Training Area', lat: -16.3, lon: 123.9, kind: 'field' },
+];
+
+/** The nearest range to a base, preferring a live-fire one where asked. */
+function rangeFor(base: RaafBase, kind?: Range['kind']): Range {
+  const pool = kind ? RANGES.filter((r) => r.kind === kind) : RANGES;
+  let best = pool[0]!;
+  let d = Infinity;
+  for (const r of pool) {
+    const dd = rngNm(base.lat, base.lon, r.lat, r.lon);
+    if (dd < d) {
+      d = dd;
+      best = r;
+    }
+  }
+  return best;
+}
+
+/** A point inside a range's working area, not its exact centre. */
+function inRange(r: Range, spreadNm = 8): { lat: number; lon: number } {
+  return project(r.lat, r.lon, Math.random() * 360, Math.random() * spreadNm);
+}
+
+/**
+ * Every aerodrome we know of, flattened once — used for AME and airlift ends.
+ *
+ * `major` matters: the pre-baked list is everything OSM calls an aerodrome, so
+ * without it a C-130J aeromedical evacuation was being sent to a private grass
+ * strip with "ambulances airside". Names ending in "Airport" are the ones with
+ * a sealed runway and somewhere to park.
+ */
+let ALL_AERODROMES: Aerodrome[] | null = null;
+function aerodromeNear(lat: number, lon: number, maxNm = 140, major = false, notIcao?: string): Aerodrome | null {
+  if (!ALL_AERODROMES) {
+    const seen = new Set<string>();
+    ALL_AERODROMES = [];
+    for (const list of Object.values(AERODROMES)) {
+      for (const a of list) {
+        if (seen.has(a.icao)) continue;
+        seen.add(a.icao);
+        ALL_AERODROMES.push(a);
+      }
+    }
+  }
+  let best: Aerodrome | null = null;
+  let d = maxNm;
+  let pool = major ? ALL_AERODROMES.filter((a) => /airport$/i.test(a.name)) : ALL_AERODROMES;
+  if (notIcao) pool = pool.filter((a) => a.icao !== notIcao);
+  for (const a of pool) {
+    const dd = rngNm(lat, lon, a.lat, a.lon);
+    if (dd < d) {
+      d = dd;
+      best = a;
+    }
+  }
+  // A sealed field is a preference, not a requirement — outback tasking would
+  // otherwise have nowhere to go at all.
+  return best ?? (major ? aerodromeNear(lat, lon, maxNm, false, notIcao) : null);
+}
+
+/**
+ * A task that happens AT an airfield — an AME pickup, a sustainment run, a VIP
+ * arrival, the destination of an instrument detail. These used to be pinned at a
+ * random point in the bush while the brief said "ambulances airside", so they
+ * snap to a real aerodrome and the brief quotes the same one.
+ */
+function fieldTask(
+  base: RaafBase,
+  minNm: number,
+  maxNm: number,
+  major = true,
+): { lat: number; lon: number; dest: string } {
+  const brg = aoBearing(base, true);
+  const at = project(base.lat, base.lon, brg, minNm + Math.random() * (maxNm - minNm));
+  const field =
+    aerodromeNear(at.lat, at.lon, 160, major, base.ident) ?? aerodromeNear(at.lat, at.lon, 400, major, base.ident);
+  if (!field) return { lat: at.lat, lon: at.lon, dest: aoPlaceName(base, at.lat, at.lon).phrase };
+  return { lat: field.lat, lon: field.lon, dest: `${field.name} (${field.icao})` };
+}
+
+/**
+ * A forward-base run goes to one of RAAFv's dry bases — the ones with no
+ * resident squadron that air mobility stands up as a detachment. That is what
+ * those bases are FOR, and it is far better tasking than "the nearest strip".
+ */
+function dryBaseFrom(base: RaafBase): RaafBase | null {
+  // Far enough to be a real deployment, near enough to be a day's tasking: a
+  // sustainment shuttle from Canberra to Curtin is 1700 NM and is not a shuttle.
+  const pool = RAAFV_BASES.filter((b) => {
+    if (!b.dry) return false;
+    const d = rngNm(base.lat, base.lon, b.lat, b.lon);
+    return d > 150 && d < 1500;
+  }).sort((a, b) => rngNm(base.lat, base.lon, a.lat, a.lon) - rngNm(base.lat, base.lon, b.lat, b.lon));
+  return pool.length ? rand(pool.slice(0, 4)) : null;
 }
 
 // -- threat profiles for intercept tasking ---------------------------
@@ -1852,13 +2766,28 @@ type RaafCtx = {
   controller: string;
   roe: string;
   night: boolean;
+  /** what is being flown, e.g. "F-35A Lightning II" */
+  type: string;
+  /** the squadron flying it */
+  squadron: string;
+  /** the nearest training area / weapons range, named */
+  range: string;
+  /** a real destination aerodrome, for tasking that goes somewhere */
+  dest: string;
+  /** the base's local training airspace, in words */
+  area: string;
 };
 
 type RaafTpl = {
   kind: string;
   category: string;
-  cls: AircraftClass;
-  agencies: [string, string][];
+  /**
+   * The capabilities that can fly this task — see fleet.ts Role. Any one of
+   * them is enough. It is a list because several tasks are genuinely flown by
+   * more than one type: the sea-air gap patrol suits both the Poseidon and the
+   * Wedgetail, and forcing a single role made the E-7A fly surface searches.
+   */
+  roles: Role[];
   weight?: number;
   p1: number;
   p2: number;
@@ -1868,23 +2797,29 @@ type RaafTpl = {
   hazards: string[];
   access: string[];
   lz: string[];
-  build: (base: RaafBase) => { lat: number; lon: number; targets?: AirTarget[] };
+  /** persons on task — "N/A" for most, a patient load for AME */
+  persons?: (c: RaafCtx) => string;
+  /** how urgent it reads on the board; ALERT 5 belongs to QRA and nothing else */
+  timeline: (pri: Priority) => string;
+  /**
+   * `range` and `dest` are returned by build, not recomputed for the brief:
+   * working them out twice is how a FAC talk-on ended up pinned over one
+   * weapons range and briefed onto another.
+   */
+  build: (base: RaafBase) => {
+    lat: number;
+    lon: number;
+    targets?: AirTarget[];
+    range?: string;
+    dest?: string;
+  };
 };
-
-const FIGHTER_SQNS: [string, string][] = [
-  ['No. 3 Squadron RAAF (F-35A)', 'Vector'],
-  ['No. 77 Squadron RAAF (F-35A)', 'Magpie'],
-  ['No. 75 Squadron RAAF (F-35A)', 'Dingo'],
-  ['No. 1 Squadron RAAF (F/A-18F)', 'Rhino'],
-  ['No. 6 Squadron RAAF (EA-18G)', 'Growler'],
-];
 
 const RAAFV_TEMPLATES: RaafTpl[] = [
   {
     kind: 'QRA Scramble - Intercept',
     category: 'Air defence',
-    cls: 'fixed',
-    agencies: FIGHTER_SQNS,
+    roles: ['qra'],
     weight: 4,
     p1: 0.9,
     p2: 0.1,
@@ -1894,17 +2829,17 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
       'Fighters go - fast, no squawk, closing controlled airspace.',
     ],
     detail: (c) =>
-      `Scramble from ${c.base}. An unidentified track is inbound from the direction of ${c.place} toward ${c.defended}. ${c.controller} has control. Run the intercept, get a visual ID, then ${c.roe} If it will not comply, be prepared to shoulder it away from ${c.defended}.`,
+      `Scramble a pair of ${c.squadron} ${c.type} from ${c.base}. An unidentified track is inbound from the direction of ${c.place} toward ${c.defended}. ${c.controller} has control. Run the intercept, get a visual ID, then ${c.roe} If it will not comply, be prepared to shoulder it away from ${c.defended}.`,
     hazards: ['High closure, wake turbulence, airliner density', 'Controlled airspace, night VID, other fighters on frequency'],
     access: ['N/A - airborne intercept'],
     lz: ['Recovery to base or a nominated divert'],
+    timeline: (pri) => (pri === 'P1' ? 'ALERT 5 - airborne inside five minutes.' : 'ALERT 15 - cockpit ready, launch on the call.'),
     build: (base) => intercept(base, chance(0.3) ? THREATS.raid! : THREATS.fast!),
   },
   {
     kind: 'QRA Scramble - Slow Mover',
     category: 'Air defence',
-    cls: 'fixed',
-    agencies: FIGHTER_SQNS,
+    roles: ['qra'],
     weight: 2,
     p1: 0.55,
     p2: 0.4,
@@ -1918,13 +2853,13 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     hazards: ['Low speed and low level over terrain', 'Poor target conspicuity, wires, birds'],
     access: ['N/A - airborne intercept'],
     lz: ['Recovery to base'],
+    timeline: (pri) => (pri === 'P1' ? 'ALERT 5 - airborne inside five minutes.' : 'ALERT 15 - brief and launch.'),
     build: (base) => intercept(base, rand([THREATS.light!, THREATS.uas!, THREATS.heli!])),
   },
   {
     kind: 'Comms-Loss Airliner Shadow',
     category: 'Air defence',
-    cls: 'fixed',
-    agencies: FIGHTER_SQNS,
+    roles: ['qra'],
     weight: 2,
     p1: 0.7,
     p2: 0.3,
@@ -1934,13 +2869,13 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     hazards: ['Wake behind a heavy, passenger optics - stay discreet', 'Sun or night on the flight deck, TCAS RAs'],
     access: ['N/A - airborne shadow'],
     lz: ['Recovery once relieved'],
+    timeline: () => 'ALERT 5 - the track is already airborne and running.',
     build: (base) => intercept(base, THREATS.airliner!),
   },
   {
     kind: 'Combat Air Patrol - CAP Station',
     category: 'Air defence',
-    cls: 'fixed',
-    agencies: FIGHTER_SQNS,
+    roles: ['cap'],
     weight: 2,
     p1: 0.15,
     p2: 0.5,
@@ -1950,6 +2885,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     hazards: ['Long time on station, fuel management, formation in the block', 'Weather and other CAP fighters'],
     access: ['N/A - CAP station'],
     lz: ['Recovery to base or the tanker'],
+    timeline: () => 'On station at the briefed vul time - plan the transit back from it.',
     build: (base) => {
       const brg = aoBearing(base);
       const c = project(base.lat, base.lon, brg, 60 + Math.random() * 120);
@@ -1957,68 +2893,18 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Air Combat Training (DACT)',
+    kind: 'Escort - Transport Corridor',
     category: 'Air defence',
-    cls: 'fixed',
-    agencies: FIGHTER_SQNS,
-    weight: 2,
-    p1: 0.1,
-    p2: 0.45,
-    brief: ['1v1 to the merge in the training area.', 'Basic fighter manoeuvres with an adversary.'],
-    detail: (c) =>
-      `Proceed to the training area near ${c.place} for dissimilar air combat training. An adversary is holding on a racetrack - fight to the merge, keep it in the area, mind the floor and the deconfliction plan, and knock it off at your bingo.`,
-    hazards: ['High-G, spatial disorientation, mid-air risk', 'Area floor and ceiling, cloud in the block'],
-    access: ['N/A - training area'],
-    lz: ['Recovery to base'],
-    build: (base) => {
-      const brg = aoBearing(base);
-      const c = project(base.lat, base.lon, brg, 50 + Math.random() * 90);
-      const alt = 24000 + Math.round(Math.random() * 10) * 1000;
-      return {
-        lat: c.lat,
-        lon: c.lon,
-        targets: [{ label: `Adversary, FL${Math.round(alt / 100)}`, titleHint: 'jet', loop: true, holdUntilNm: 60, route: racetrack(c, 24, 8, alt, 360) }],
-      };
-    },
-  },
-  {
-    kind: 'Air-To-Air Refuelling - Tanker Rendezvous',
-    category: 'Air mobility',
-    cls: 'fixed',
-    agencies: [['No. 33 Squadron RAAF (KC-30A)', 'Dragon']],
-    weight: 2,
-    p1: 0.05,
-    p2: 0.45,
-    brief: ['Pre-planned AAR bracket, receivers inbound.', 'Towline established - join as receiver.'],
-    detail: (c) =>
-      `Proceed from ${c.base} to the AAR towline near ${c.place}. Join on the tanker as a receiver, fly the racetrack in close formation, take on fuel, then clear to the right and resume tasking. ${c.controller} has the block.`,
-    hazards: ['Formation, wake, cloud in the block', 'Fuel state, other receivers on the boom'],
-    access: ['N/A - airborne'],
-    lz: ['Recovery to base'],
-    build: (base) => {
-      const brg = aoBearing(base);
-      const c = project(base.lat, base.lon, brg, 60 + Math.random() * 90);
-      return {
-        lat: c.lat,
-        lon: c.lon,
-        targets: [{ label: 'KC-30A tanker, FL250', titleHint: 'heavy', loop: true, holdUntilNm: 70, route: racetrack(c, 36, 12, 25000, 290) }],
-      };
-    },
-  },
-  {
-    kind: 'Transport / VIP Escort',
-    category: 'Air mobility',
-    cls: 'fixed',
-    agencies: [['No. 35 Squadron RAAF (C-27J)', 'Spartan'], ['No. 37 Squadron RAAF (C-130J)', 'Hercules'], ['No. 34 Squadron RAAF (BBJ)', 'Envoy']],
-    weight: 2,
+    roles: ['cap'],
     p1: 0.1,
     p2: 0.4,
-    brief: ['Escort a transport along the corridor to the FOB.', 'Shadow a VIP aircraft through the sector.'],
+    brief: ['Escort a transport along the corridor to the forward base.', 'Shadow a VIP aircraft through the sector.'],
     detail: (c) =>
-      `Depart ${c.base} and rendezvous with a transport routing toward ${c.place}. Escort it along the corridor, keep a visual watch either side, and hand it to the terminal controller. ${c.controller} has coordination.`,
+      `Depart ${c.base} and rendezvous with a transport routing toward ${c.place}. Escort it along the corridor, keep a visual watch either side, and hand it to the terminal controller at ${c.dest}. ${c.controller} has coordination.`,
     hazards: ['Speed mismatch, formation, terrain and weather in the corridor', 'Night formation join'],
     access: ['N/A - airborne'],
     lz: ['Recovery to base'],
+    timeline: () => 'Rendezvous time is fixed by the transport - be at the join point early.',
     build: (base) => {
       const brg = aoBearing(base, true);
       const far = 160 + Math.random() * 140;
@@ -2039,33 +2925,121 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Airborne Insertion - DZ Overwatch',
-    category: 'Air mobility',
-    cls: 'fixed',
-    agencies: [['No. 37 Squadron RAAF (C-130J)', 'Hercules'], ['No. 35 Squadron RAAF (C-27J)', 'Spartan']],
+    kind: 'Air Combat Training (DACT)',
+    category: 'Air combat training',
+    roles: ['dact'],
+    weight: 2,
     p1: 0.1,
-    p2: 0.4,
-    brief: ['Escort the drop aircraft to the DZ and watch the run-in.', 'Overwatch a low-level static-line drop.'],
+    p2: 0.45,
+    brief: ['1v1 to the merge in the training area.', 'Basic fighter manoeuvres with an adversary.'],
     detail: (c) =>
-      `A drop aircraft will run in to the DZ near ${c.place} at low level and slow speed. Escort it to the release point, watch the run and the canopies, call any hazards, then shepherd it back up to height. ${c.controller} coordinating with the DZ party.`,
-    hazards: ['Low level, low speed, sink behind the heavy', 'Canopies and jumpers in the air, wires near the DZ'],
+      `Proceed to ${c.area} for dissimilar air combat training in the ${c.type}. An adversary is holding on a racetrack - fight to the merge, keep it inside the area, mind the floor and the deconfliction plan, and knock it off at your bingo.`,
+    hazards: ['High-G, spatial disorientation, mid-air risk', 'Area floor and ceiling, cloud in the block'],
+    access: ['N/A - training area'],
+    lz: ['Recovery to base'],
+    timeline: () => 'Booked airspace slot - airborne on time or the area is lost.',
+    build: (base) => {
+      const brg = aoBearing(base);
+      const c = project(base.lat, base.lon, brg, 50 + Math.random() * 90);
+      const alt = 24000 + Math.round(Math.random() * 10) * 1000;
+      return {
+        lat: c.lat,
+        lon: c.lon,
+        targets: [{ label: `Adversary, FL${Math.round(alt / 100)}`, titleHint: 'jet', loop: true, holdUntilNm: 60, route: racetrack(c, 24, 8, alt, 360) }],
+      };
+    },
+  },
+  {
+    kind: 'Lead-In Fighter - Air Combat Intro',
+    category: 'Air combat training',
+    roles: ['lif'],
+    weight: 2,
+    p1: 0,
+    p2: 0.35,
+    brief: ['Introductory fighter course - 1v1 in the training area.', 'Lead-in fighter sortie: handling, then a fight.'],
+    detail: (c) =>
+      `Introductory Fighter Course sortie in the ${c.type}. Depart ${c.base} for ${c.area}, work through the handling sequence, then fight the staff aircraft to the merge. Height block and floor as briefed, knock it off at bingo, and debrief the tape on the ground. ${c.controller} for the area.`,
+    hazards: ['Student under high workload, G-induced fatigue', 'Area floor, cloud in the block, other training traffic'],
+    access: ['N/A - training area'],
+    lz: ['Recovery to base'],
+    timeline: () => 'Booked airspace slot - the staff aircraft is on the wave behind you.',
+    build: (base) => {
+      const brg = aoBearing(base);
+      const c = project(base.lat, base.lon, brg, 35 + Math.random() * 60);
+      const alt = 18000 + Math.round(Math.random() * 6) * 1000;
+      return {
+        lat: c.lat,
+        lon: c.lon,
+        targets: [{ label: `Staff aircraft, FL${Math.round(alt / 100)}`, titleHint: 'jet', loop: true, holdUntilNm: 45, route: racetrack(c, 18, 6, alt, 300) }],
+      };
+    },
+  },
+  {
+    kind: 'Air-To-Air Refuelling - Towline',
+    category: 'Air mobility',
+    roles: ['aar'],
+    weight: 2,
+    p1: 0.05,
+    p2: 0.45,
+    brief: ['Establish the towline, receivers inbound.', 'Pre-planned AAR bracket - fighters need fuel.'],
+    detail: (c) =>
+      `Take the ${c.type} from ${c.base} to the AAR towline near ${c.place}. Establish the racetrack in the assigned block, hold height and speed steady while the receivers cycle through, and pass the planned offload. ${c.controller} has the block. Fighters will join from below and behind - do not manoeuvre once they are in contact.`,
+    hazards: ['Receivers in close formation, wake, cloud in the block', 'Long time in the block, fuel planning for the offload'],
     access: ['N/A - airborne'],
     lz: ['Recovery to base'],
+    timeline: () => 'On the towline by the briefed bracket time - the receivers plan their fuel around it.',
     build: (base) => {
-      const brg = aoBearing(base, true);
-      const far = 60 + Math.random() * 80;
-      const dz = project(base.lat, base.lon, brg, far);
-      const run0 = project(dz.lat, dz.lon, (brg + 180) % 360, 18);
-      const run2 = project(dz.lat, dz.lon, brg, 12);
+      const brg = aoBearing(base);
+      const c = project(base.lat, base.lon, brg, 60 + Math.random() * 90);
+      const alt = 24000 + Math.round(Math.random() * 4) * 1000;
+      return {
+        lat: c.lat,
+        lon: c.lon,
+        targets: [
+          {
+            label: `Receivers - fighter pair, FL${Math.round(alt / 100)}`,
+            titleHint: 'jet',
+            formation: 2,
+            holdUntilNm: 70,
+            route: racetrack(c, 30, 10, alt, 300),
+            loop: true,
+          },
+        ],
+      };
+    },
+  },
+  {
+    kind: 'Airborne Insertion - Paratroop Drop',
+    category: 'Air mobility',
+    roles: ['airdrop'],
+    weight: 2,
+    p1: 0.1,
+    p2: 0.4,
+    brief: ['Low-level run-in to the DZ, static-line drop.', 'Deliver paratroops onto the drop zone.'],
+    detail: (c) =>
+      `Fly the ${c.type} from ${c.base} to the drop zone at ${c.range}. Run in at low level and drop speed on the briefed heading, hit the release point on time, then climb away and re-join the airway. The DZ party is on the ground and will call the wind. ${c.controller} for airspace.`,
+    hazards: ['Low level at low speed, heavy aircraft - no margin for a late correction', 'Canopies in the air behind you, wires and stock near the DZ'],
+    access: ['Drop zone - no landing'],
+    lz: ['Recovery to base'],
+    persons: () => `${rint(24, 90)} paratroops and the dispatch crew`,
+    timeline: () => 'Time on target is fixed - the DZ party and the ground scheme are built around it.',
+    build: (base) => {
+      const r = rangeFor(base, 'field');
+      const dz = inRange(r, 5);
+      const range = r.name;
+      const run = Math.random() * 360;
+      const run0 = project(dz.lat, dz.lon, (run + 180) % 360, 18);
+      const run2 = project(dz.lat, dz.lon, run, 12);
       return {
         lat: dz.lat,
         lon: dz.lon,
+        range,
         targets: [
           {
-            label: 'Drop aircraft, 1200 ft, 130 kt',
+            label: 'Formation lead - 1200 ft, 130 kt',
             titleHint: 'heavy',
             holdUntilNm: 40,
-            route: [p(run0, 6000, 210), p(dz, 1200, 130), p(run2, 1200, 130), p(project(run2.lat, run2.lon, brg, far), 9000, 240)],
+            route: [p(run0, 6000, 210), p(dz, 1200, 130), p(run2, 1200, 130), p(project(run2.lat, run2.lon, run, 60), 9000, 240)],
           },
         ],
       };
@@ -2074,56 +3048,76 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
   {
     kind: 'Close Air Support - JTAC',
     category: 'Strike / ISR',
-    cls: 'fixed',
-    agencies: [['No. 1 Squadron RAAF (F/A-18F)', 'Rhino'], ['No. 75 Squadron RAAF (F-35A)', 'Dingo'], ['No. 4 Squadron RAAF (FAC)', 'Havoc']],
+    roles: ['cas'],
+    weight: 2,
     p1: 0.2,
     p2: 0.5,
     brief: ['Check in with the JTAC, hold the wheel, be ready for a 9-line.', 'CAS on-call over the ground scheme of manoeuvre.'],
     detail: (c) =>
-      `Transit to the CAS keyhole near ${c.place} and check in with the JTAC. Set up a wheel at the briefed height, build a picture of the friendly and target locations, read back the 9-line, and remain on-station to your bingo. ${c.controller} for airspace.`,
-    hazards: ['Terrain masking, small-arms threat envelope, other CAS aircraft', 'Density altitude, dust, smoke on the target'],
+      `Transit to the CAS keyhole over ${c.range} and check in with the JTAC. Set up a wheel at the briefed height, build a picture of the friendly and target locations, read back the 9-line, and remain on-station to your bingo. ${c.controller} for airspace.`,
+    hazards: ['Terrain masking, simulated threat envelope, other CAS aircraft in the stack', 'Density altitude, dust and smoke on the target'],
     access: ['N/A - CAS keyhole'],
     lz: ['Recovery to base or the tanker'],
+    timeline: () => 'On-call - be overhead for the ground force H-hour.',
     build: (base) => {
-      const brg = aoBearing(base, true);
-      const c = project(base.lat, base.lon, brg, 50 + Math.random() * 110);
-      return { lat: c.lat, lon: c.lon };
+      const r = rangeFor(base);
+      const c = inRange(r, 10);
+      return { lat: c.lat, lon: c.lon, range: r.name };
+    },
+  },
+  {
+    kind: 'Forward Air Control - Talk-On',
+    category: 'Strike / ISR',
+    roles: ['fac'],
+    p1: 0.15,
+    p2: 0.45,
+    brief: ['FAC(A) over the range - mark and talk fast jets onto the target.', 'Control the stack for a CAS serial.'],
+    detail: (c) =>
+      `Take the ${c.type} to ${c.range} as the airborne forward air controller. Hold a wheel above the target area, build the picture, mark the target, then talk each pair of fast jets onto it and clear them hot. Keep the stack deconflicted by height and watch your own fuel. ${c.controller} for the area.`,
+    hazards: ['Slow aircraft low over a live range, small-arms envelope', 'Multiple aircraft in the stack, talk-on workload'],
+    access: ['N/A - overhead the range'],
+    lz: ['Recovery to base'],
+    timeline: () => 'Be on station before the first CAS pair checks in.',
+    build: (base) => {
+      const r = rangeFor(base);
+      const c = inRange(r, 8);
+      return { lat: c.lat, lon: c.lon, range: r.name };
     },
   },
   {
     kind: 'Tactical Reconnaissance Run',
     category: 'Strike / ISR',
-    cls: 'fixed',
-    agencies: [['No. 75 Squadron RAAF (F-35A)', 'Dingo'], ['No. 1 Squadron RAAF (F/A-18F)', 'Rhino']],
+    roles: ['recon'],
     p1: 0.1,
     p2: 0.4,
     brief: ['Single fast pass over the target for imagery.', 'Low-level recon of the coastal strip.'],
     detail: (c) =>
-      `Fly a tactical reconnaissance run over the objective near ${c.place}. Ingress low and fast on the briefed heading, hold the line and speed through the target for the sensor, one pass only, then egress and climb. ${c.controller} for deconfliction.`,
+      `Fly a tactical reconnaissance run over the objective at ${c.range}. Ingress low and fast on the briefed heading, hold the line and speed through the target for the sensor, one pass only, then egress and climb. ${c.controller} for deconfliction.`,
     hazards: ['Very low level at high speed, wires and towers, bird strike', 'One-pass discipline - no re-attacks'],
     access: ['N/A - recon track'],
     lz: ['Recovery to base'],
+    timeline: () => 'Time on target to the minute - the imagery is worthless late.',
     build: (base) => {
-      const brg = aoBearing(base, true);
-      const c = project(base.lat, base.lon, brg, 60 + Math.random() * 120);
-      return { lat: c.lat, lon: c.lon };
+      const r = rangeFor(base);
+      const c = inRange(r, 12);
+      return { lat: c.lat, lon: c.lon, range: r.name };
     },
   },
   {
     kind: 'Maritime Patrol - Surface Picture',
     category: 'ISR / maritime',
-    cls: 'fixed',
-    agencies: [['No. 11 Squadron RAAF (P-8A)', 'Poseidon'], ['No. 10 Squadron RAAF (P-8A)', 'Poseidon']],
+    roles: ['maritime'],
     weight: 2,
     p1: 0.1,
     p2: 0.4,
     offshore: true,
     brief: ['Build the surface picture in the patrol box.', 'Investigate an AIS-dark contact offshore.'],
     detail: (c) =>
-      `Transit from ${c.base} to the maritime patrol box offshore from ${c.place}. Run the search pattern, log every contact with position, course and speed, photograph anything of interest, and stay outside 500 ft of vessels unless directed. ${c.controller} for the area.`,
-    hazards: ['Low level over water, fatigue, birds', 'Weather building offshore, oil-rig traffic'],
+      `Transit the ${c.type} from ${c.base} to the maritime patrol box offshore from ${c.place}. Run the search pattern, log every contact with position, course and speed, photograph anything of interest, and stay above 500 ft over vessels unless directed otherwise. ${c.controller} for the area.`,
+    hazards: ['Low level over water, crew fatigue, birds', 'Weather building offshore, rig traffic and helicopter lanes'],
     access: ['N/A - patrol box'],
     lz: ['Recovery to base'],
+    timeline: () => 'Long tasking - plan the fuel and the crew duty before you sign for it.',
     build: (base) => {
       const brg = base.sea + (Math.random() - 0.5) * 40;
       const c = project(base.lat, base.lon, brg, 120 + Math.random() * 180);
@@ -2133,17 +3127,17 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
   {
     kind: 'Sovereignty Patrol - Northern Approaches',
     category: 'ISR / maritime',
-    cls: 'fixed',
-    agencies: [['No. 11 Squadron RAAF (P-8A)', 'Poseidon'], ['No. 2 Squadron RAAF (E-7A)', 'Wedgetail']],
+    roles: ['maritime', 'aewc'],
     p1: 0.1,
     p2: 0.4,
     offshore: true,
     brief: ['Patrol the northern approaches, report all air and surface tracks.', 'Presence patrol along the sea-air gap.'],
     detail: (c) =>
-      `Patrol the northern approaches out of ${c.base}. Sweep the assigned lane toward the sea-air gap, correlate every air and surface track, investigate anything unusual, and report to ${c.controller}. Long tasking - manage crew and fuel.`,
-    hazards: ['Very long endurance, remote diversion options', 'Tropical weather, other patrol assets'],
+      `Patrol the northern approaches out of ${c.base}. Sweep the assigned lane toward the sea-air gap, correlate every air and surface track, investigate anything unusual, and report to ${c.controller}. Long tasking - manage crew and fuel, and note the nearest divert is a long way behind you.`,
+    hazards: ['Very long endurance, remote diversion options', 'Tropical weather, other patrol assets in the lane'],
     access: ['N/A - patrol lane'],
     lz: ['Recovery to base'],
+    timeline: () => 'Long tasking - brief the divert plan before you launch.',
     build: (base) => {
       const brg = base.sea + (Math.random() - 0.5) * 30;
       const c = project(base.lat, base.lon, brg, 180 + Math.random() * 220);
@@ -2151,18 +3145,40 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'ISR Orbit - Area of Operations',
+    kind: 'Search and Rescue - Search Pattern',
     category: 'ISR / maritime',
-    cls: 'fixed',
-    agencies: [['No. 2 Squadron RAAF (E-7A)', 'Wedgetail']],
+    roles: ['sar'],
+    weight: 2,
+    p1: 0.75,
+    p2: 0.25,
+    offshore: true,
+    brief: ['Overdue vessel - fly the search pattern and find it.', 'EPIRB detection offshore, no voice contact.', 'Missing aircraft - search the last known track.'],
+    detail: (c) =>
+      `JRCC has requested the ${c.type} for a search offshore from ${c.place}. Fly the assigned creeping-line pattern at search height and speed, put every crew position on a sector, and report any sighting immediately with a position. Be prepared to drop stores and hold overhead until surface units arrive. ${c.controller} for the area.`,
+    hazards: ['Low level over water, sea state and glare, long time on task', 'Other search aircraft in the pattern - height deconfliction is everything'],
+    access: ['N/A - search area'],
+    lz: ['Recovery to base or the nearest suitable field'],
+    persons: () => 'Persons in the water - number unknown',
+    timeline: () => 'Immediate - survivability is measured in hours.',
+    build: (base) => {
+      const brg = base.sea + (Math.random() - 0.5) * 60;
+      const c = project(base.lat, base.lon, brg, 60 + Math.random() * 160);
+      return { lat: c.lat, lon: c.lon };
+    },
+  },
+  {
+    kind: 'ISR Orbit - Recognised Air Picture',
+    category: 'ISR / maritime',
+    roles: ['aewc'],
     p1: 0.05,
     p2: 0.35,
-    brief: ['Establish an ISR / AEW&C orbit over the AO.', 'Provide the recognised air picture for the exercise.'],
+    brief: ['Establish an AEW&C orbit over the AO.', 'Provide the recognised air picture for the exercise.'],
     detail: (c) =>
-      `Depart ${c.base} and set up an AEW&C orbit over the area near ${c.place}. Build and pass the recognised air picture, control the fighters and the tanker, and remain on station until relieved. ${c.controller} takes hand-over.`,
+      `Depart ${c.base} in the ${c.type} and set up an AEW&C orbit over the area near ${c.place}. Build and pass the recognised air picture, control the fighters and the tanker, and remain on station until relieved. ${c.controller} takes hand-over.`,
     hazards: ['Long endurance, other high-level traffic', 'Weather and turbulence at height'],
     access: ['N/A - orbit'],
     lz: ['Recovery to base'],
+    timeline: () => 'On station for the start of the vul - everyone else plans around your picture.',
     build: (base) => {
       const brg = aoBearing(base);
       const c = project(base.lat, base.lon, brg, 60 + Math.random() * 140);
@@ -2170,58 +3186,260 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     },
   },
   {
-    kind: 'Aeromedical Evacuation (Mil)',
+    kind: 'Tactical Airlift - Forward Base',
     category: 'Air mobility',
-    cls: 'fixed',
-    agencies: [['No. 36 Squadron RAAF (C-17A)', 'Stallion'], ['No. 37 Squadron RAAF (C-130J)', 'Hercules']],
+    roles: ['tactical'],
+    weight: 2,
+    p1: 0.1,
+    p2: 0.45,
+    brief: ['Move freight and passengers forward to the detachment.', 'Sustainment run into a bare base.'],
+    detail: (c) =>
+      `Load the ${c.type} at ${c.base} and run the sustainment shuttle to ${c.dest}. Freight, ground crew and rations forward; unserviceable stores and outbound passengers back. Expect a short turn on the ground with engines running, no air-conditioning cart and no steps. ${c.controller} for routing.`,
+    hazards: ['Short turn on the ground, loading in heat, hot refuel', 'Unsurfaced or unlit strip, wildlife on the runway'],
+    access: ['Sealed or prepared strip - check the pavement concession before landing'],
+    lz: ['Runway at the destination'],
+    persons: () => `${rint(6, 40)} passengers and ${rint(2, 8)} pallets`,
+    timeline: () => 'The detachment is waiting on this load - same-day turn.',
+    build: (base) => {
+      const dry = dryBaseFrom(base);
+      if (dry) return { lat: dry.lat, lon: dry.lon, dest: `${dry.name} (${dry.ident})` };
+      return fieldTask(base, 120, 380);
+    },
+  },
+  {
+    kind: 'Air Mobility Shuttle',
+    category: 'Air mobility',
+    roles: ['transport'],
+    weight: 2,
+    p1: 0,
+    p2: 0.3,
+    brief: ['Scheduled passenger and freight run between bases.', 'Move the course and their gear to the detachment.'],
+    detail: (c) =>
+      `Scheduled air mobility run in the ${c.type} from ${c.base} to ${c.dest}. Passengers, baggage and palletised freight, manifest closed one hour before departure. Standard airways routing, civil terminal procedures at the far end, and a turn-round for the return leg the same day. ${c.controller} for the clearance.`,
+    hazards: ['Mixing with civil traffic at the destination', 'Weight and balance with a late manifest change, weather at the far end'],
+    access: ['Sealed runway, civil or military apron'],
+    lz: ['Sealed runway'],
+    persons: () => `${rint(4, 30)} passengers`,
+    timeline: () => 'Scheduled departure - the manifest is built around it.',
+    build: (base) => fieldTask(base, 150, 450),
+  },
+  {
+    kind: 'Aeromedical Evacuation',
+    category: 'Air mobility',
+    roles: ['ame'],
+    weight: 2,
     p1: 0.4,
     p2: 0.45,
     brief: ['Strategic AME move of casualties to a major hospital.', 'Repatriate patients from a forward location.'],
     detail: (c) =>
-      `Position ${c.base}, load the AME team and litter patients near ${c.place}, and transit to the receiving hospital. Smooth handling, cabin altitude restriction for the head-injury patients, ambulances both ends. ${c.controller} for routing.`,
-    hazards: ['Cabin altitude limits, patient deterioration in flight', 'Long tasking, night arrival'],
-    access: ['Airfield, ambulances airside'],
+      `Position the ${c.type} to ${c.dest}, load the AME team and the litter patients, and transit to the receiving hospital. Smooth handling throughout, cabin altitude restriction for the head-injury patient, ambulances both ends. ${c.controller} for routing and for the priority handling into the destination.`,
+    hazards: ['Cabin altitude limits, patient deterioration in flight', 'Long tasking, night arrival, ambulance coordination airside'],
+    access: ['Airfield - ambulances airside, patients loaded from the ramp'],
     lz: ['Sealed runway'],
+    persons: () => `${rint(1, 4)} litter and ${rint(0, 6)} ambulatory patients, plus the AME team`,
+    timeline: (pri) =>
+      pri === 'P1' ? 'Time-critical patient - launch as soon as the team is aboard.' : 'Planned move - patients are stable, fly it smoothly.',
+    build: (base) => fieldTask(base, 80, 240),
+  },
+  {
+    kind: 'VIP Movement',
+    category: 'Air mobility',
+    roles: ['vip'],
+    p1: 0.05,
+    p2: 0.45,
+    brief: ['Government movement - principal and party.', 'Special purpose flight, fixed arrival time.'],
+    detail: (c) =>
+      `Special purpose flight in the ${c.type} from ${c.base} to ${c.dest}, carrying the principal and party. Arrival time is fixed and public - plan the descent to make it to the minute, expect media on the apron, and brief the cabin crew on the arrival sequence. ${c.controller} for priority handling.`,
+    hazards: ['Fixed arrival time, no room to be late or early', 'Apron congestion, media and ground party on the tarmac'],
+    access: ['Terminal or VIP apron - ground party meets the aircraft'],
+    lz: ['Sealed runway'],
+    persons: () => 'Principal and party aboard',
+    timeline: () => 'Wheels down to the minute - the whole movement is built around the arrival time.',
+    build: (base) => fieldTask(base, 140, 440),
+  },
+  {
+    kind: 'Navigation Exercise (NAVEX)',
+    category: 'Flying training',
+    roles: ['trainer'],
+    weight: 3,
+    p1: 0,
+    p2: 0.25,
+    brief: ['Low-level navigation exercise, dead reckoning and timing.', 'Cross-country navex with a diversion en route.'],
+    detail: (c) =>
+      `Navigation exercise in the ${c.type} out of ${c.base}. Route via the turning points toward ${c.place}, low level where the route allows, dead reckoning with a stopwatch and map only. Expect a diversion to ${c.dest} partway round - replan in the air, hold the fuel plan, and be back on time.`,
+    hazards: ['Low level in a training area, other training aircraft on the same route', 'Terrain and wires at turning points, sun on the map'],
+    access: ['N/A - navigation route'],
+    lz: ['Recovery to base'],
+    timeline: () => 'Booked sortie - airborne on the wave time.',
     build: (base) => {
       const brg = aoBearing(base, true);
-      const c = project(base.lat, base.lon, brg, 80 + Math.random() * 160);
+      const c = project(base.lat, base.lon, brg, 40 + Math.random() * 110);
       return { lat: c.lat, lon: c.lon };
     },
   },
+  {
+    kind: 'Formation Training Sortie',
+    category: 'Flying training',
+    roles: ['formation'],
+    weight: 2,
+    p1: 0,
+    p2: 0.25,
+    brief: ['Close and tactical formation in the training area.', 'Formation sortie - join, echelon, and a tail chase.'],
+    detail: (c) =>
+      `Formation sortie in the ${c.type}. Depart ${c.base} for ${c.area}, run the join, hold close formation through the sequence, then split to tactical and finish with a tail chase. Watch the lead's wing, watch the fuel, and re-join for a formation recovery. ${c.controller} for the area.`,
+    hazards: ['Close formation - overtake and closure are the whole risk', 'Cloud in the block, other training traffic, student fatigue'],
+    access: ['N/A - training area'],
+    lz: ['Recovery to base - formation approach'],
+    timeline: () => 'Booked airspace slot - lead is airborne first.',
+    build: (base) => {
+      const brg = aoBearing(base);
+      const c = project(base.lat, base.lon, brg, 25 + Math.random() * 55);
+      const alt = 8000 + Math.round(Math.random() * 8) * 1000;
+      return {
+        lat: c.lat,
+        lon: c.lon,
+        targets: [{ label: `Formation lead, ${alt} ft`, titleHint: 'prop', loop: true, holdUntilNm: 35, route: racetrack(c, 14, 6, alt, 220) }],
+      };
+    },
+  },
+  {
+    kind: 'Instrument Flying Detail',
+    category: 'Flying training',
+    roles: ['trainer'],
+    weight: 2,
+    p1: 0,
+    p2: 0.2,
+    brief: ['Instrument detail - holds, procedural approaches, a go-around.', 'IF renewal: airways sector then approaches at the destination.'],
+    detail: (c) =>
+      `Instrument flying detail in the ${c.type}. Depart ${c.base} on an airways clearance, fly the sector to ${c.dest}, then a hold and two instrument approaches with a missed approach off the first. Full procedural, no shortcuts, and expect the instructor to fail something. ${c.controller} for the clearance.`,
+    hazards: ['Under the hood or in cloud, instrument workload', 'Mixing with civil traffic at the destination, icing in the climb'],
+    access: ['N/A - instrument training'],
+    lz: ['Recovery to base'],
+    timeline: () => 'Booked sortie and a booked approach slot at the destination.',
+    build: (base) => fieldTask(base, 50, 170, false),
+  },
 ];
 
-/** Generate one RAAFv job. `near` biases toward a RAAF base within reach. */
+/**
+ * Who tasked it, and who is on the phone. Both used to come from one catch-all
+ * list, so a close air support serial could be reported by "Movements" and a
+ * search and rescue call could come from "Exercise Control" rather than the
+ * rescue coordination centre that actually raises them.
+ */
+function raafSource(tpl: RaafTpl): string {
+  if (tpl.roles.includes('sar')) return 'JRCC Australia';
+  if (tpl.category === 'Air defence') return rand(['Air Defence', 'Sector Ops', 'the AOCC']);
+  if (tpl.category === 'Flying training' || tpl.category === 'Air combat training')
+    return rand(['Squadron Ops', 'the Duty Instructor', 'Wing Ops']);
+  if (tpl.category === 'Air mobility') return rand(['Air Mobility Control Centre', 'the AOCC', 'Wing Ops']);
+  return rand(['the AOCC', 'Exercise Control', 'HQ Air Command']);
+}
+
+function raafInformant(tpl: RaafTpl): string {
+  if (tpl.roles.includes('sar')) return rand(['JRCC search mission coordinator', 'The RCC duty officer']);
+  if (tpl.category === 'Air defence')
+    return rand(['Sector controller', 'AOCC duty officer', 'Ground CRC', 'The fighter controller']);
+  if (tpl.category === 'Flying training' || tpl.category === 'Air combat training')
+    return rand(['Duty instructor', 'Squadron authoriser', 'The wave supervisor']);
+  if (tpl.category === 'Air mobility') return rand(['Movements', 'The detachment commander', 'AOCC duty officer']);
+  return rand(['The JTAC', 'Squadron Ops', 'AOCC duty officer', 'The exercise director']);
+}
+
+/** The other unit that matters to this task — not a random one from a list. */
+function supportingUnit(tpl: RaafTpl): string {
+  if (tpl.roles.includes('sar')) return rand(['Surface units tasked', 'Second search aircraft inbound', 'JRCC coordinating']);
+  if (tpl.category === 'Air defence') return rand(['Wingman airborne', 'Tanker on the towline', 'AEW&C on station']);
+  if (tpl.category === 'Air combat training' || tpl.category === 'Flying training')
+    return rand(['Duty instructor authorising', 'Staff aircraft on the wave behind', 'Supervisor of flying on watch']);
+  if (tpl.roles.includes('ame')) return rand(['AME team aboard', 'Ambulances booked both ends', 'Receiving hospital notified']);
+  if (tpl.category === 'Air mobility') return rand(['Movements team at both ends', 'Ground handling booked', 'Load team on the ramp']);
+  return rand(['JTAC on the ground', 'Range control open', 'Second pair on the wave behind']);
+}
+
+/**
+ * Generate one RAAFv job. `near` biases toward a base within reach.
+ *
+ * The order matters: base first, then what that base can actually launch, then a
+ * mission those aircraft can fly. Doing it the other way round is what used to
+ * produce a Hercules flying a QRA scramble.
+ */
 export function generateRaafJob(near?: { lat: number; lon: number } | null): Job {
-  let bases = RAAF_BASES;
+  // Bases that can actually launch: the home bases, plus any dry base the live
+  // fleet shows a detachment sitting at. A dry base with nothing parked is a
+  // destination, never a departure point.
+  let bases = launchableBases();
   if (near) {
     const local = bases.filter((b) => rngNm(near.lat, near.lon, b.lat, b.lon) <= 420);
     bases = local.length
       ? local
-      : [...RAAF_BASES]
+      : [...HOME_BASES]
           .sort((a, b) => rngNm(near.lat, near.lon, a.lat, a.lon) - rngNm(near.lat, near.lon, b.lat, b.lon))
           .slice(0, 2);
   }
-  const base = rand(bases);
-  const tpl = ((): RaafTpl => {
-    const total = RAAFV_TEMPLATES.reduce((s, t) => s + (t.weight ?? 1), 0);
+  // Weighted by base tempo: Williamtown and Amberley run most of RAAFv's flying,
+  // and the Point Cook flying school should not generate as many sorties a day
+  // as the largest operational base — which uniform selection had it doing.
+  const base = ((): RaafBase => {
+    // A stood-up detachment flies, but it is not a main operating base — tempo 0
+    // (every dry base) becomes 1, against 7 for Williamtown.
+    const weight = (b: RaafBase) => Math.max(1, b.tempo);
+    const total = bases.reduce((s2, b) => s2 + weight(b), 0);
     let r = Math.random() * total;
-    for (const t of RAAFV_TEMPLATES) {
+    for (const b of bases) {
+      r -= weight(b);
+      if (r <= 0) return b;
+    }
+    return bases[bases.length - 1]!;
+  })();
+
+  // What can this base put in the air right now? With a crew centre key that is
+  // the live fleet; without one it is the published order of battle.
+  const here = availabilityAt(base);
+  const can = (rs: Role[], have: Set<Role>) => rs.some((r) => have.has(r));
+  const usable = RAAFV_TEMPLATES.filter((t) => can(t.roles, here.roles));
+  // A base with nothing suitable parked (every airframe airborne, say) would
+  // otherwise return no job at all — fall back to its resident squadrons.
+  const resident = rosterRoles(base);
+  const pool = usable.length ? usable : RAAFV_TEMPLATES.filter((t) => can(t.roles, resident));
+  if (pool.length === 0) return generateRaafJob(null);
+
+  const tpl = ((): RaafTpl => {
+    const total = pool.reduce((s, t) => s + (t.weight ?? 1), 0);
+    let r = Math.random() * total;
+    for (const t of pool) {
       r -= t.weight ?? 1;
       if (r <= 0) return t;
     }
-    return RAAFV_TEMPLATES[RAAFV_TEMPLATES.length - 1]!;
+    return pool[pool.length - 1]!;
   })();
+
+  // The specific airframe: a real tail number off the crew centre when we have
+  // one, otherwise a resident squadron of the right type.
+  const role = tpl.roles.find((r) => here.roles.has(r)) ?? tpl.roles.find((r) => resident.has(r)) ?? tpl.roles[0]!;
+  const assigned = availabilityAt(base, role);
+  const liveUnit = assigned.aircraft ? unitForAircraft(assigned.aircraft) : null;
+  const local = unitsFor(base, role);
+  const unit = liveUnit ?? rand(local.length ? local : base.units);
+  const callsign = `${unit.callsign} ${rint(1, 4) * 10 + rint(1, 2)}`;
+
   const built = tpl.build(base);
-  const [agency, cs] = rand(tpl.agencies);
-  const callsign = `${cs} ${rint(1, 4) * 10 + rint(1, 2)}`;
-  const place = aoPlaceName(base, built.lat, built.lon);
+  const where = aoPlaceName(base, built.lat, built.lon);
   const day = daypart();
+  // Never the departure base: a navigation exercise out of Pearce was being
+  // told to divert to Pearce.
+  const destField = aerodromeNear(built.lat, built.lon, 140, false, base.ident) ?? aerodromeNear(base.lat, base.lon, 400, false, base.ident);
   const ctx: RaafCtx = {
     base: base.name,
     ident: base.ident,
-    place,
-    defended: nearestDefended(built.lat, built.lon),
-    controller: rand(['Sector (Air Defence)', 'Eastern RADAR', 'Northern RADAR', 'Brisbane Centre', 'Melbourne Centre', 'the AOCC']),
+    place: where.phrase,
+    defended: nearestDefended(base.lat, base.lon, where.phrase),
+    // Air defence tasking talks to the control and reporting units; everyone
+    // else talks to the area centre. One shared list had Sector (Air Defence)
+    // routing an aeromedical flight.
+    controller:
+      tpl.category === 'Air defence'
+        ? rand(['Sector (Air Defence)', 'Eastern RADAR', 'Northern RADAR', 'the AOCC'])
+        : rand(['Brisbane Centre', 'Melbourne Centre', 'the AOCC', 'the area controller']),
     roe: rand([
       'get a visual ID and shadow - no closer than 500 ft, no signals unless directed.',
       'ID covertly, then overtly signal and escort it clear.',
@@ -2229,11 +3447,24 @@ export function generateRaafJob(near?: { lat: number; lon: number } | null): Job
       'ID, report the picture, and hold off until the fighter controller commits you.',
     ]),
     night: day.night,
+    type: unit.type,
+    squadron: unit.squadron,
+    range: built.range ?? rangeFor(base).name,
+    dest: built.dest ?? (destField ? `${destField.name} (${destField.icao})` : where.phrase),
+    area: `the ${base.name.replace(/^(RAAFv Base |vDefence Establishment )/, '')} training area`,
   };
+  const jobRegion = regionAt(built.lat, built.lon, base.region);
   const x = Math.random();
   const priority: Priority = x < tpl.p1 ? 'P1' : x < tpl.p1 + tpl.p2 ? 'P2' : 'P3';
   const w = wx(day.night);
   const tgt = built.targets?.[0];
+
+  const tail = assigned.aircraft?.registration;
+  const units = [
+    `${callsign} - ${unit.squadron} ${unit.type}${tail ? ` (${tail})` : ''}`,
+    `${base.name} (${base.ident}) - base ops`,
+    supportingUnit(tpl),
+  ];
 
   return {
     id: randomUUID(),
@@ -2244,38 +3475,50 @@ export function generateRaafJob(near?: { lat: number; lon: number } | null): Job
     claimedAt: null,
     phase: null,
 
-    aircraftClass: tpl.cls,
+    aircraftClass: 'fixed',
     priority,
     kind: tpl.kind,
     category: tpl.category,
-    agency,
+    agency: `${unit.squadron} RAAF (${unit.type})`,
     callsign,
 
     lat: built.lat,
     lon: built.lon,
-    place: `${tpl.offshore ? 'Offshore - ' : ''}${base.name} AO, ${place}, ${base.region}`,
-    region: base.region,
+    // A flying training sortie happens in a training area, not an "area of
+    // operations" — the label is what an operator scans the board by.
+    place: `${tpl.offshore ? 'Offshore - ' : ''}${base.name} ${tpl.category === 'Flying training' ? 'training area' : 'AO'}, ${where.label}, ${jobRegion}`,
+    region: jobRegion,
     latLon: dms(built.lat, built.lon),
 
     brief: `${day.label[0]!.toUpperCase()}${day.label.slice(1)}: ${rand(tpl.brief)}`,
     detail: [
       tpl.detail(ctx),
+      tail ? `Airframe allocated: ${tail}, on the line at ${base.ident}.` : '',
+      assigned.detachment ? `${unit.squadron} is deployed to ${base.name} — operating as a detachment.` : '',
       tgt?.squawk && tgt.squawk !== '0000' ? `Target squawk ${tgt.squawk}.` : tgt && tgt.squawk === '0000' ? 'Target is not squawking.' : '',
       tgt?.formation ? `Expect ${tgt.formation} aircraft in trail.` : '',
       w.note,
     ]
       .filter(Boolean)
       .join(' '),
-    source: rand(['Air Defence', 'Sector Ops', 'AOCC', 'Exercise Control', 'HQ Air Command']),
-    informant: rand(['Sector controller', 'AOCC duty officer', 'Ground CRC', 'ROC', 'The fighter controller']),
+    source: raafSource(tpl),
+    informant: raafInformant(tpl),
     hazards: rand(tpl.hazards),
-    persons: 'N/A - airborne task',
+    persons: tpl.persons ? tpl.persons(ctx) : 'N/A - airborne task',
     access: rand(tpl.access),
     lz: rand(tpl.lz),
-    units: [`${callsign} (tasked)`, `${base.ident}`, rand(['Wingman airborne', 'Tanker on the towline', 'AEW&C on station', 'SAR alert crew held'])],
+    units,
     weather: w.text,
-    timeline: priority === 'P1' ? 'Priority 1 - ALERT 5, get airborne now.' : `Priority ${priority[1]} - brief and go.`,
+    timeline: `Priority ${priority[1]} - ${tpl.timeline(priority)}`,
     channel: 'raafv',
     targets: built.targets,
+    tasked: {
+      type: unit.type,
+      squadron: unit.squadron,
+      registration: tail,
+      homeBase: `${base.name} (${base.ident})`,
+      detachment: assigned.detachment || undefined,
+      source: tail ? 'crew-centre' : 'roster',
+    },
   };
 }

@@ -10,7 +10,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "prebake:features": "node scripts/prebake-features.mjs src/features.json"
+    "prebake:features": "node scripts/prebake-features.mjs src/features.json",
+    "prebake:roads": "node scripts/prebake-roads.mjs src/roads.json"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",

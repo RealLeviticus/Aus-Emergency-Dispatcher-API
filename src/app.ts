@@ -9,6 +9,7 @@ import { clientMessage, type ClientMessage, type ServerMessage } from './types.j
 import { healthRoutes } from './routes/health.js';
 import { objectRoutes } from './routes/objects.js';
 import { authRoutes } from './routes/auth.js';
+import { fleetRoutes } from './routes/fleet.js';
 
 function tokenOk(token: string | undefined): boolean {
   if (config.API_TOKENS.length === 0) return true; // auth disabled (dev)
@@ -29,6 +30,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(healthRoutes);
   await app.register(objectRoutes);
   await app.register(authRoutes);
+  await app.register(fleetRoutes);
 
   app.register(async (scoped) => {
     scoped.get('/ws', { websocket: true }, (socket, req) => {

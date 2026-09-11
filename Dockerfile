@@ -4,7 +4,7 @@ COPY package*.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
-# the build copies runtime data files (features.json, aerodromes.json) into dist
+# the build copies runtime data files (features.json, roads.json, aerodromes.json) into dist
 COPY scripts ./scripts
 RUN npm run build
 
