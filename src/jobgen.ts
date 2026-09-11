@@ -1716,10 +1716,19 @@ function airwayRoute(base: RaafBase, brg: number, far: number, alt: number, spd:
  * A quarter of tasks still go seaward, which is realistic for air defence and
  * maritime work; those get an honest over-water place name (see aoPlaceName).
  */
-function aoBearing(base: RaafBase): number {
-  if (chance(0.25)) return Math.random() * 360; // genuinely maritime tasking
+/**
+ * Which way the area of operations lies from the base.
+ *
+ * `landOnly` matters for tasking that has to happen on the ground: a drop
+ * zone, a JTAC's troops, or an aeromedical evacuation loading litter patients
+ * with "ambulances airside". Without it the 25% maritime branch was putting
+ * casualty loading points in the Tasman Sea.
+ */
+function aoBearing(base: RaafBase, landOnly = false): number {
+  if (!landOnly && chance(0.25)) return Math.random() * 360; // genuinely maritime tasking
   const inland = base.sea + 180;
-  return (inland + (Math.random() - 0.5) * 150 + 360) % 360;
+  const spread = landOnly ? 90 : 150;
+  return (inland + (Math.random() - 0.5) * spread + 360) % 360;
 }
 
 const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
@@ -2011,7 +2020,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - airborne'],
     lz: ['Recovery to base'],
     build: (base) => {
-      const brg = aoBearing(base);
+      const brg = aoBearing(base, true);
       const far = 160 + Math.random() * 140;
       const heavy = chance(0.4);
       const datum = project(base.lat, base.lon, brg, far * 0.45);
@@ -2043,7 +2052,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - airborne'],
     lz: ['Recovery to base'],
     build: (base) => {
-      const brg = aoBearing(base);
+      const brg = aoBearing(base, true);
       const far = 60 + Math.random() * 80;
       const dz = project(base.lat, base.lon, brg, far);
       const run0 = project(dz.lat, dz.lon, (brg + 180) % 360, 18);
@@ -2076,7 +2085,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - CAS keyhole'],
     lz: ['Recovery to base or the tanker'],
     build: (base) => {
-      const brg = aoBearing(base);
+      const brg = aoBearing(base, true);
       const c = project(base.lat, base.lon, brg, 50 + Math.random() * 110);
       return { lat: c.lat, lon: c.lon };
     },
@@ -2095,7 +2104,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['N/A - recon track'],
     lz: ['Recovery to base'],
     build: (base) => {
-      const brg = aoBearing(base);
+      const brg = aoBearing(base, true);
       const c = project(base.lat, base.lon, brg, 60 + Math.random() * 120);
       return { lat: c.lat, lon: c.lon };
     },
@@ -2174,7 +2183,7 @@ const RAAFV_TEMPLATES: RaafTpl[] = [
     access: ['Airfield, ambulances airside'],
     lz: ['Sealed runway'],
     build: (base) => {
-      const brg = aoBearing(base);
+      const brg = aoBearing(base, true);
       const c = project(base.lat, base.lon, brg, 80 + Math.random() * 160);
       return { lat: c.lat, lon: c.lon };
     },
